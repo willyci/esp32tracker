@@ -1,0 +1,26 @@
+# --- XcodeGen output (regenerate with `xcodegen generate`) ---
+*.xcodeproj
+*.xcworkspace
+
+# --- Xcode / Swift ---
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+*.swiftpm
+.swiftpm/
+.netrc
+
+# --- macOS ---
+.DS_Store
+
+# --- PlatformIO (firmware) ---
+firmware/.pio/
+firmware/.pioenvs/
+firmware/.piolibdeps/
+
+# --- Arduino IDE build artifacts ---
+firmware/**/build/
+*.bin
+*.elf
+*.hex

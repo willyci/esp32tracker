@@ -1,0 +1,34 @@
+# XcodeGen project definition for the visionOS app.
+# Generate the Xcode project with:   xcodegen generate
+# Then open ESP32Tracker.xcodeproj.   Requires XcodeGen >= 2.38 (visionOS support).
+
+name: ESP32Tracker
+
+options:
+  bundleIdPrefix: com.example
+  createIntermediateGroups: true
+  deploymentTarget:
+    visionOS: "1.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    # Set your Apple Developer Team ID here to build/run on a real Vision Pro.
+    # DEVELOPMENT_TEAM: ABCDE12345
+
+targets:
+  ESP32Tracker:
+    type: application
+    platform: visionOS
+    sources:
+      - path: ESP32Tracker
+        excludes:
+          - "**/*.md"        # keep the setup notes out of the build
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ESP32Tracker
+        TARGETED_DEVICE_FAMILY: "7"          # 7 = visionOS
+        GENERATE_INFOPLIST_FILE: "YES"       # no hand-written Info.plist needed
+        # Bluetooth permission string, injected straight into the generated Info.plist.
+        # Without this the app crashes the moment Core Bluetooth starts.
+        INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription: "Connect to the orientation sensor."
