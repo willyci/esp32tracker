@@ -14,14 +14,26 @@
 #include <NimBLEDevice.h>
 
 // ---- I2C pins (ESP32-C3 SuperMini defaults; confirm against your board silk) ----
-static constexpr int PIN_SDA = 8;
-static constexpr int PIN_SCL = 9;
+static constexpr int PIN_SDA = 0;
+static constexpr int PIN_SCL = 1;
 static constexpr uint8_t BNO_ADDR = 0x4B;   // this board scans at 0x4B; some use 0x4A
 
 // ---- BLE identifiers — must match the app exactly ----
+// Service + characteristic UUIDs are IDENTICAL on both boards (that's how the app
+// finds any tracker). Only the advertised NAME differs, so the app can tell the
+// left hand from the right.
 #define SERVICE_UUID      "4F7A0001-9B3E-4C2A-8D1F-0A1B2C3D4E5F"
 #define ORIENTATION_UUID  "4F7A0002-9B3E-4C2A-8D1F-0A1B2C3D4E5F"
-#define DEVICE_NAME       "ESP32-Tracker"
+
+// ---- Which hand is this board? Flip this ONE line before flashing each board. ----
+//   1 = left hand   |   0 = right hand
+#define IS_LEFT_HAND 1
+
+#if IS_LEFT_HAND
+  #define DEVICE_NAME "Left Hand Tracker"
+#else
+  #define DEVICE_NAME "Right Hand Tracker"
+#endif
 
 // ---- 32-byte wire format (little-endian; ESP32 + Apple silicon are both LE) ----
 struct __attribute__((packed)) OrientationPacket {
@@ -82,8 +94,17 @@ void setupBLE() {
   service->start();
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-  adv->addServiceUUID(SERVICE_UUID);
-  adv->setName(DEVICE_NAME);
+  adv->addServiceUUID(SERVICE_UUID);          // 128-bit UUID fills most of the 31-byte adv packet
+  adv->setScanResponse(true);
+
+  // "Left/Right Hand Tracker" is too long to fit in the main advertising packet
+  // alongside a 128-bit service UUID, so carry the name in the scan response.
+  // iOS merges scan-response data, so CBAdvertisementDataLocalNameKey still sees the
+  // full name — which is how the app tells the two hands apart.
+  NimBLEAdvertisementData scanData;
+  scanData.setName(DEVICE_NAME);
+  adv->setScanResponseData(scanData);
+
   adv->start();
   Serial.println("BLE advertising as " DEVICE_NAME);
 }

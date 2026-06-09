@@ -4,7 +4,9 @@ The box rotates "wrong" out of the box because the sensor and RealityKit describ
 **different coordinate frames**. This guide explains the two frames, the one correct operation to
 convert between them, and a 10-minute empirical procedure to nail it down.
 
-The relevant code is `displayOrientation` in `ESP32Tracker/BLEManager.swift`.
+The relevant code is `displayOrientation` in `ESP32Tracker/TrackerState.swift` (one instance per
+hand). The same `basis` / `mountOffset` apply to both trackers; calibrate with one board, then the
+values carry to the other.
 
 ---
 

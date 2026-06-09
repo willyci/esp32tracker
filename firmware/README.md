@@ -9,16 +9,16 @@ packet over BLE notify (~50 Hz) to the visionOS app.
 |--------|--------------------|
 | VIN    | 3V3                |
 | GND    | GND                |
-| SDA    | GPIO8              |
-| SCL    | GPIO9              |
+| SDA    | GPIO0              |
+| SCL    | GPIO1              |
 
 ```
    BNO085 breakout                 ESP32-C3 SuperMini
   ┌───────────────┐               ┌───────────────────┐
   │           VIN ●───────────────● 3V3                │
   │           GND ●───────────────● GND                │
-  │           SDA ●───────────────● GPIO8  (SDA)       │
-  │           SCL ●───────────────● GPIO9  (SCL)       │
+  │           SDA ●───────────────● GPIO0  (SDA)       │
+  │           SCL ●───────────────● GPIO1  (SCL)       │
   │                               │                    │
   │  RST INT P0 P1  ← unused      │  [USB-C]  ← to Mac │
   └───────────────┘               └───────────────────┘
@@ -28,8 +28,24 @@ Only these four wires. Leave the BNO085's RST / INT / P0 / P1 / PS pins unconnec
 uses plain I2C polling. Power from **3V3**, not 5V (the C3's GPIOs are 3.3 V logic). Adafruit/SparkFun
 breakouts already have I2C pull-ups, so none to add.
 
-Confirm GPIO8/9 against your board's silkscreen; SuperMini clones vary. The pins are set in the sketch
-(`PIN_SDA` / `PIN_SCL`), so change them there if your board differs.
+GPIO0/1 are used (not GPIO8/9): on the SuperMini, GPIO8 is the onboard LED and GPIO8/9 are boot
+strapping pins, so GPIO0/1 are the cleaner choice for I2C. Confirm against your board's silkscreen;
+SuperMini clones vary. The pins are set in the sketch (`PIN_SDA` / `PIN_SCL`), so change them there if
+your board differs.
+
+## Two boards: left + right hand
+
+This firmware drives two identical trackers. One line near the top of the sketch picks which hand a
+board is, which sets its advertised BLE name:
+
+```cpp
+#define IS_LEFT_HAND 1   // 1 = "Left Hand Tracker"   |   0 = "Right Hand Tracker"
+```
+
+Flash board 1 with `1`, change to `0` and flash board 2. Both boards share the **same** service and
+characteristic UUIDs — only the name differs, which is how the app tells them apart. The name is sent
+in the BLE **scan response** (it's too long to fit in the main advertising packet next to the 128-bit
+service UUID), so a scanner shows the full "Left/Right Hand Tracker" name.
 
 ## Troubleshooting
 
@@ -74,11 +90,12 @@ pio device monitor      # 115200 baud
 
 ## Bring-up order (matches SPEC.md milestones)
 1. **Serial first.** After flashing, the monitor should print `BNO08x ready` then
-   `BLE advertising as ESP32-Tracker`. If you want to eyeball the quaternion, temporarily add a
-   `Serial.printf` of `pkt.w/x/y/z` in `loop()`.
-2. **Verify BLE with a scanner.** Use **nRF Connect** (iOS/Android) — confirm a device named
-   `ESP32-Tracker` advertising service `4F7A0001-…`, subscribe to char `4F7A0002-…`, and watch
-   32-byte notifications arrive. Bytes 0–15 are the quaternion floats (little-endian).
+   `BLE advertising as Left Hand Tracker` (or `Right Hand Tracker`, per `IS_LEFT_HAND`). If you want to
+   eyeball the quaternion, temporarily add a `Serial.printf` of `pkt.w/x/y/z` in `loop()`.
+2. **Verify BLE with a scanner.** Use **nRF Connect** (iOS/Android) — confirm devices named
+   `Left Hand Tracker` / `Right Hand Tracker` advertising service `4F7A0001-…`, subscribe to char
+   `4F7A0002-…`, and watch 32-byte notifications arrive. Bytes 0–15 are the quaternion floats
+   (little-endian). With both boards flashed, both names should appear.
 3. **Then connect the Vision Pro app.**
 
 ## Packet format (must match the app)

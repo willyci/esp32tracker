@@ -43,7 +43,15 @@ only rotates.
 | IMU | BNO085 (preferred) **or** BNO055 / DFRobot SEN0253 | Both output a fused quaternion. |
 | Bus | I2C (SDA/SCL + 3V3 + GND) | BNO055 uses clock stretching → keep it on the C3's HW I2C, not ESP8266. |
 
-Default I2C pins on ESP32-C3 SuperMini: **SDA = GPIO8, SCL = GPIO9** (confirm against your board silk).
+I2C pins used: **SDA = GPIO0, SCL = GPIO1** (confirm against your board silk). GPIO8/9 are avoided —
+GPIO8 is the SuperMini's onboard LED and GPIO8/9 are boot strapping pins.
+
+> **Two-device update (current):** the prototype now runs **two** trackers — left and right hand —
+> each rendered as its own 3D object. Both boards run the same firmware; `#define IS_LEFT_HAND` sets a
+> board's hand and its advertised BLE name (`Left Hand Tracker` / `Right Hand Tracker`). Both share the
+> same service/characteristic UUIDs; the app distinguishes them by name. The sections below describe the
+> single-device v0; the multi-device wiring is the same per board, and the app changes are reflected in
+> the file layout.
 
 ---
 
@@ -100,11 +108,16 @@ lighter than the stock BLE stack).
 ```
 ESP32Tracker/
 ├── ESP32TrackerApp.swift          // @main, WindowGroup
-├── ContentView.swift              // layout: RealityView + data panel + connect button
-├── BLEManager.swift               // CoreBluetooth, ObservableObject
-├── SensorState.swift              // model: quaternion, accel, calib, connectionState
-└── OrientationScene.swift         // RealityView setup + per-frame entity rotation
+├── ContentView.swift              // layout: RealityView + two data panels + Scan/Re-center
+├── BLEManager.swift               // CoreBluetooth, ObservableObject; connects to BOTH boards,
+│                                  //   routes each peripheral to its hand by advertised name
+├── TrackerState.swift             // per-hand model: Hand/ConnectionState enums, quaternion, accel,
+│                                  //   calib, packet parsing, and the orientation-shaping math
+└── OrientationScene.swift         // RealityView setup + per-frame rotation of the two entities
 ```
+
+> Note: the orientation-shaping logic (`basis`, `mountOffset`, `reference`, `displayOrientation`,
+> `recenter`) lives in **TrackerState.swift** — one instance per hand — not in BLEManager.
 
 ### `BLEManager` (CoreBluetooth)
 - `NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate`.
