@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<!-- Live dashboard for the two ESP32 hand trackers. Served by tracker_dashboard.py;
+     data arrives over a WebSocket at /ws as JSON {left: {...}, right: {...}}.
+     No external libraries — the cubes are pure CSS 3D so this works fully offline. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ESP32 Hand Trackers</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 24px;
+    background: #14161a; color: #e8e8ea;
+    font-family: "Segoe UI", system-ui, sans-serif;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  #server-status { font-size: 13px; color: #9aa0a8; margin-bottom: 20px; }
+
+  .hands { display: flex; gap: 28px; flex-wrap: wrap; }
+  .hand-card {
+    background: #1d2026; border: 1px solid #2a2e36; border-radius: 14px;
+    padding: 20px; width: 380px;
+  }
+  .hand-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .hand-title { font-size: 17px; font-weight: 600; flex: 1; }
+  .badge {
+    font-size: 12px; padding: 3px 10px; border-radius: 10px;
+    background: #2a2e36; color: #9aa0a8;
+  }
+  .badge.connected { background: #163a26; color: #4ade80; }
+
+  /* ---- 3D cube (dice faces match the visionOS scene: 1F 6B 2R 5L 3T 4Bot) ---- */
+  .scene { width: 200px; height: 200px; margin: 10px auto 24px; perspective: 700px; }
+  .cube {
+    width: 120px; height: 120px; position: relative; margin: 40px auto;
+    transform-style: preserve-3d;
+  }
+  .face {
+    position: absolute; width: 120px; height: 120px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 52px; font-weight: 700; color: #fff;
+    border: 2px solid rgba(255,255,255,.35); border-radius: 8px;
+    backface-visibility: hidden;
+  }
+  .left  .face { background: rgba(13,148,136,.88); }   /* teal */
+  .right .face { background: rgba(147,51,234,.88); }   /* purple */
+  .f1 { transform: rotateY(  0deg) translateZ(60px); }
+  .f6 { transform: rotateY(180deg) translateZ(60px); }
+  .f2 { transform: rotateY( 90deg) translateZ(60px); }
+  .f5 { transform: rotateY(-90deg) translateZ(60px); }
+  .f3 { transform: rotateX( 90deg) translateZ(60px); }
+  .f4 { transform: rotateX(-90deg) translateZ(60px); }
+
+  /* ---- numeric panel ---- */
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td { padding: 3px 0; }
+  td.lbl { color: #9aa0a8; width: 36px; }
+  td.val { font-family: Consolas, monospace; text-align: right; }
+  .section { font-size: 13px; font-weight: 600; color: #9aa0a8;
+             text-transform: uppercase; letter-spacing: .04em; padding-top: 10px; }
+  .calib { font-weight: 700; }
+
+  button {
+    background: #2a2e36; color: #e8e8ea; border: 1px solid #3a3f49;
+    border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+  }
+  button:hover { background: #343945; }
+  .controls { margin-top: 14px; display: flex; gap: 10px; }
+  #recenter-all { margin-top: 20px; }
+</style>
+</head>
+<body>
+  <h1>ESP32 Hand Trackers</h1>
+  <div id="server-status">Connecting to dashboard server…</div>
+
+  <div class="hands">
+    <div class="hand-card" id="card-left"></div>
+    <div class="hand-card" id="card-right"></div>
+  </div>
+  <button id="recenter-all">Re-center both</button>
+
+<script>
+"use strict";
+
+// ---------- quaternion helpers ({w,x,y,z}) ----------
+const qMul = (a, b) => ({
+  w: a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
+  x: a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+  y: a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+  z: a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+});
+const qConj = q => ({ w: q.w, x: -q.x, y: -q.y, z: -q.z });
+const qAxisAngle = (axis, angle) => {
+  const s = Math.sin(angle / 2);
+  return { w: Math.cos(angle / 2), x: axis[0]*s, y: axis[1]*s, z: axis[2]*s };
+};
+const Q_IDENTITY = { w: 1, x: 0, y: 0, z: 0 };
+
+// ---------- frame mapping — ported 1:1 from ESP32Tracker/TrackerState.swift ----------
+// raw packet → negate x,z (mirror fix), then conjugate by basis (BNO Z-up → Y-up),
+// then the physical mounting offset. Keep these in sync with the Swift app.
+const BASIS = qMul(qAxisAngle([1,0,0], Math.PI/2), qAxisAngle([0,0,1], Math.PI/2));
+const BASIS_INV = qConj(BASIS);
+const MOUNT_OFFSET = qAxisAngle([1,0,0], Math.PI/2);
+
+function displayOrientation(sample, reference) {
+  const q = { w: sample.w, x: -sample.x, y: sample.y, z: -sample.z };
+  return qMul(qMul(qMul(BASIS, qMul(reference, q)), BASIS_INV), MOUNT_OFFSET);
+}
+
+// Quaternion (Y-up right-handed, like RealityKit) → CSS matrix3d.
+// CSS's screen frame has Y pointing DOWN, so conjugate the rotation matrix with
+// diag(1,-1,1) — negate every element with exactly one Y index. Column-major output.
+function quatToMatrix3d(q) {
+  const {w, x, y, z} = q;
+  const m = [
+    1 - 2*(y*y + z*z),  2*(x*y - w*z),      2*(x*z + w*y),
+    2*(x*y + w*z),      1 - 2*(x*x + z*z),  2*(y*z - w*x),
+    2*(x*z - w*y),      2*(y*z + w*x),      1 - 2*(x*x + y*y),
+  ];
+  const F = [1, -1, 1];
+  const c = (r, cIdx) => F[r] * m[r*3 + cIdx] * F[cIdx];
+  return `matrix3d(${c(0,0)},${c(1,0)},${c(2,0)},0,` +
+                  `${c(0,1)},${c(1,1)},${c(2,1)},0,` +
+                  `${c(0,2)},${c(1,2)},${c(2,2)},0,0,0,0,1)`;
+}
+
+// ---------- per-hand UI ----------
+const HANDS = ["left", "right"];
+const CALIB_COLORS = ["#ef4444", "#f97316", "#a3e635", "#4ade80"];
+const latest = {};      // hand → last sample from the server
+const reference = { left: Q_IDENTITY, right: Q_IDENTITY };   // re-center references
+
+function buildCard(hand) {
+  const title = hand === "left" ? "Left Hand" : "Right Hand";
+  const color = hand === "left" ? "#0d9488" : "#9333ea";
+  document.getElementById(`card-${hand}`).innerHTML = `
+    <div class="hand-header">
+      <span class="dot" style="background:${color}"></span>
+      <span class="hand-title">${title}</span>
+      <span class="badge" id="badge-${hand}">Scanning…</span>
+    </div>
+    <div class="scene"><div class="cube ${hand}" id="cube-${hand}">
+      <div class="face f1">1</div><div class="face f6">6</div>
+      <div class="face f2">2</div><div class="face f5">5</div>
+      <div class="face f3">3</div><div class="face f4">4</div>
+    </div></div>
+    <table>
+      <tr><td colspan="2" class="section">Quaternion</td></tr>
+      ${["w","x","y","z"].map(k =>
+        `<tr><td class="lbl">${k}</td><td class="val" id="q-${k}-${hand}">+0.000</td></tr>`).join("")}
+      <tr><td colspan="2" class="section">Accel (m/s²)</td></tr>
+      ${["ax","ay","az"].map(k =>
+        `<tr><td class="lbl">${k[1]}</td><td class="val" id="${k}-${hand}">+0.00</td></tr>`).join("")}
+      <tr><td class="lbl section">Calib</td>
+          <td class="val calib" id="calib-${hand}">0/3</td></tr>
+    </table>
+    <div class="controls">
+      <button onclick="recenter('${hand}')">Re-center</button>
+    </div>`;
+}
+HANDS.forEach(buildCard);
+
+function recenter(hand) {
+  const s = latest[hand];
+  if (!s) return;
+  // Same as the Swift app: reference = (negated raw quaternion).inverse
+  reference[hand] = qConj({ w: s.w, x: -s.x, y: s.y, z: -s.z });
+}
+document.getElementById("recenter-all").onclick = () => HANDS.forEach(recenter);
+
+const fmt = (v, d) => (v >= 0 ? "+" : "") + v.toFixed(d);
+
+function render() {
+  for (const hand of HANDS) {
+    const s = latest[hand];
+    if (!s) continue;
+
+    const badge = document.getElementById(`badge-${hand}`);
+    badge.textContent = s.connected ? "Connected" : "Scanning…";
+    badge.classList.toggle("connected", s.connected);
+
+    document.getElementById(`cube-${hand}`).style.transform =
+      quatToMatrix3d(displayOrientation(s, reference[hand]));
+
+    for (const k of ["w","x","y","z"])
+      document.getElementById(`q-${k}-${hand}`).textContent = fmt(s[k], 3);
+    for (const k of ["ax","ay","az"])
+      document.getElementById(`${k}-${hand}`).textContent = fmt(s[k], 2);
+
+    const calib = document.getElementById(`calib-${hand}`);
+    calib.textContent = `${s.calib}/3`;
+    calib.style.color = CALIB_COLORS[s.calib] || CALIB_COLORS[0];
+  }
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+
+// ---------- WebSocket (auto-reconnects if the Python server restarts) ----------
+const status = document.getElementById("server-status");
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { status.textContent = "Dashboard server connected — scanning for trackers over Bluetooth."; };
+  ws.onmessage = e => { Object.assign(latest, JSON.parse(e.data)); };
+  ws.onclose = () => {
+    status.textContent = "Dashboard server lost — retrying…";
+    setTimeout(connect, 1000);
+  };
+}
+connect();
+</script>
+</body>
+</html>
