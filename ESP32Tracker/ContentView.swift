@@ -10,8 +10,8 @@ struct ContentView: View {
                 .glassBackgroundEffect()
 
             VStack(spacing: 18) {
-                TrackerPanel(tracker: ble.left)
-                TrackerPanel(tracker: ble.right)
+                TrackerPanel(tracker: ble.left, color: .teal)      // matches the teal cube
+                TrackerPanel(tracker: ble.right, color: .purple)   // matches the purple cube
 
                 HStack(spacing: 12) {
                     Button("Scan") { ble.startScan() }
@@ -31,10 +31,12 @@ struct ContentView: View {
 /// One panel per hand: connection state, quaternion, accel, calibration, re-center.
 struct TrackerPanel: View {
     @ObservedObject var tracker: TrackerState
+    let color: Color
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
+                Circle().fill(color).frame(width: 12, height: 12)
                 Text("\(tracker.hand.label) Hand").font(.title3.bold())
                 Spacer()
                 Label(tracker.connection.rawValue,

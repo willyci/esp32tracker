@@ -2,9 +2,9 @@ import SwiftUI
 import RealityKit
 import UIKit
 
-/// The 3D viewport: two separate objects — left and right hand — each rotating to
-/// match its own tracker. They sit at fixed points and only rotate (orientation only;
-/// position tracking is out of scope — see SPEC.md).
+/// The 3D viewport: two dice-style cubes — left (teal) and right (purple) — each
+/// rotating to match its own tracker. They sit at fixed points and only rotate
+/// (orientation only; position tracking is out of scope — see SPEC.md).
 ///
 /// Takes the two `TrackerState`s as @ObservedObject so the RealityView `update:`
 /// closure re-runs whenever EITHER hand publishes a new sample.
@@ -31,37 +31,46 @@ struct OrientationScene: View {
         }
     }
 
-    /// Builds one tracker object. Prefers the bundled probe model; falls back to a
-    /// colored box with an orange nose (so rotation — and which hand — is readable).
+    /// Builds one tracker cube: per-hand color, with a white number on each of the
+    /// six faces (dice layout — opposite faces sum to 7) so every rotation is readable.
     private static func makeTrackerEntity(name: String, color: UIColor) -> Entity {
         let container = Entity()
         container.name = name
 
-        if let probe = try? Entity.load(named: "probe") {
-            // Normalize the model's size regardless of how the asset was authored.
-            container.addChild(probe)
-            let bounds = probe.visualBounds(relativeTo: container)
-            let maxExtent = max(bounds.extents.x, bounds.extents.y, bounds.extents.z)
-            if maxExtent > 0 {
-                let s = 0.2 / maxExtent
-                probe.scale = SIMD3<Float>(repeating: s)
-                probe.position = -bounds.center * s
-            }
-            return container
-        }
-
-        // Placeholder: a flat box (per-hand color) with an orange nose marking +Z (front).
-        let body = ModelEntity(
-            mesh: .generateBox(width: 0.16, height: 0.035, depth: 0.09, cornerRadius: 0.004),
+        let size: Float = 0.12
+        let cube = ModelEntity(
+            mesh: .generateBox(size: size, cornerRadius: 0.005),
             materials: [SimpleMaterial(color: color, isMetallic: false)]
         )
-        let nose = ModelEntity(
-            mesh: .generateBox(width: 0.05, height: 0.05, depth: 0.02, cornerRadius: 0.002),
-            materials: [SimpleMaterial(color: .systemOrange, isMetallic: false)]
-        )
-        nose.position = [0, 0, 0.055]
-        body.addChild(nose)
-        container.addChild(body)
+        container.addChild(cube)
+
+        // Each entry: number, face-center position, rotation turning +Z to face outward.
+        let half = size / 2 + 0.001   // float the glyph just above the surface
+        let faces: [(label: String, position: SIMD3<Float>, rotation: simd_quatf)] = [
+            ("1", [0, 0,  half], simd_quatf(angle: 0,        axis: [0, 1, 0])),  // front
+            ("6", [0, 0, -half], simd_quatf(angle: .pi,      axis: [0, 1, 0])),  // back
+            ("2", [ half, 0, 0], simd_quatf(angle:  .pi / 2, axis: [0, 1, 0])),  // right
+            ("5", [-half, 0, 0], simd_quatf(angle: -.pi / 2, axis: [0, 1, 0])),  // left
+            ("3", [0,  half, 0], simd_quatf(angle: -.pi / 2, axis: [1, 0, 0])),  // top
+            ("4", [0, -half, 0], simd_quatf(angle:  .pi / 2, axis: [1, 0, 0])),  // bottom
+        ]
+        for face in faces {
+            let text = ModelEntity(
+                mesh: .generateText(face.label,
+                                    extrusionDepth: 0.002,
+                                    font: .systemFont(ofSize: 0.07, weight: .bold)),
+                materials: [SimpleMaterial(color: .white, isMetallic: false)]
+            )
+            // generateText anchors at the baseline's origin, not the glyph center.
+            let bounds = text.model!.mesh.bounds
+            text.position = [-bounds.center.x, -bounds.center.y, 0]
+
+            let holder = Entity()
+            holder.position = face.position
+            holder.orientation = face.rotation
+            holder.addChild(text)
+            cube.addChild(holder)
+        }
         return container
     }
 }
