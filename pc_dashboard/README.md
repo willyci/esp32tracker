@@ -15,6 +15,18 @@ python tracker_dashboard.py
 The browser opens `http://localhost:8765` automatically. Power on one or both trackers —
 each card flips from *Scanning…* to *Connected* as its board is found.
 
+### macOS notes
+
+Works unchanged (`bleak` uses CoreBluetooth there; use `pip3` / `python3`). Two gotchas:
+
+- **Bluetooth permission:** the first scan pops a macOS privacy prompt for your terminal app.
+  If denied, scans silently find nothing — re-enable under **System Settings → Privacy &
+  Security → Bluetooth**.
+- **Quit the dashboard before testing the Vision Pro app.** A board accepts only one central;
+  while the dashboard is connected, the board stops advertising and the headset can't find it.
+  (Conversely, the dashboard is a good reference: if it sees both boards and the visionOS app
+  doesn't, the bug is in the Swift side.)
+
 ## How to test
 
 Do these in order — each step verifies one layer of the pipeline.

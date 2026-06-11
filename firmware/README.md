@@ -3,6 +3,17 @@
 Reads the BNO085's fused rotation vector + accelerometer over I2C and streams a 32-byte
 packet over BLE notify (~50 Hz) to the visionOS app.
 
+## Two sketches
+
+| Sketch | What it is |
+|--------|-----------|
+| `esp32_tracker/esp32_tracker.ino` | The base tracker (no display). |
+| `esp32_tracker_display/esp32_tracker_display.ino` | Same tracker + a 128x64 OLED showing hand, BLE state, calibration, quaternion, and accel — live, no serial monitor needed. Use this for untethered/battery boards. |
+
+Both speak the **identical** BLE protocol (UUIDs + packet below), so the visionOS app and the PC
+dashboard work with either. They live in separate folders because the Arduino IDE concatenates every
+`.ino` in a sketch folder into one build — open each from its own folder.
+
 ## Wiring (I2C)
 
 | BNO085 | ESP32-C3 SuperMini |
@@ -32,6 +43,27 @@ GPIO0/1 are used (not GPIO8/9): on the SuperMini, GPIO8 is the onboard LED and G
 strapping pins, so GPIO0/1 are the cleaner choice for I2C. Confirm against your board's silkscreen;
 SuperMini clones vary. The pins are set in the sketch (`PIN_SDA` / `PIN_SCL`), so change them there if
 your board differs.
+
+### OLED (display sketch only)
+
+The display sketch adds a 128x64 OLED (GME12864 / SSD1306) on a **separate software-I2C bus**, so its
+slow bitbanged refresh can never stall the sensor bus:
+
+| OLED | ESP32-C3 SuperMini |
+|------|--------------------|
+| VCC  | 3V3                |
+| GND  | GND                |
+| SDA  | GPIO3              |
+| SCL  | GPIO4              |
+
+Both the BNO085 and the OLED share the 3V3 pin and a common GND (~35 mA total — well within the
+regulator's budget). The screen shows `LEFT`/`RIGHT` + `ADV`/`CONN` + `C:n` (calibration) on top, then
+quaternion w/x/y/z (left column) and accel x/y/z (right column), refreshed at 10 Hz — a full redraw
+over software I2C blocks for tens of ms, so it's throttled to keep the 50 Hz BLE stream steady.
+Sanity check: board flat and still → `az` reads ≈ +9.8 (gravity).
+
+If text appears garbled/shifted, the module is the 1.3" **SH1106** variant — swap `SSD1306` → `SH1106`
+in the display constructor (noted in the sketch).
 
 ## Two boards: left + right hand
 
@@ -84,19 +116,30 @@ pio device monitor      # 115200 baud
 ```
 
 ## Build — Arduino IDE
-1. Install ESP32 board support (Boards Manager → "esp32" by Espressif).
-2. Library Manager → install **Adafruit BNO08x** and **NimBLE-Arduino** (use 1.4.x).
-3. Open `esp32_tracker/esp32_tracker.ino`, select board **ESP32C3 Dev Module**, upload.
+1. Install ESP32 board support (Boards Manager → "esp32" by Espressif, **version 2.0.17** — the
+   3.x core crashes with NimBLE 1.4.x at BLE startup: `Guru Meditation` / `MEPC: 0x00000000`).
+2. Library Manager → install **Adafruit BNO08x** and **NimBLE-Arduino** (use **1.4.x**, not 2.x —
+   the server-callback signatures changed). For the display sketch, also install **U8g2** (by oliver).
+3. Open `esp32_tracker/esp32_tracker.ino` (or `esp32_tracker_display/esp32_tracker_display.ino`),
+   select board **ESP32C3 Dev Module**, set **USB CDC On Boot: Enabled** (this resets when you
+   change cores!), set `IS_LEFT_HAND` for the board in hand, upload.
+4. Keep the Arduino sketchbook on a plain local path (e.g. `C:\Arduino`) — a OneDrive-synced
+   sketchbook causes random `Permission denied` errors on library headers during compile.
 
 ## Bring-up order (matches SPEC.md milestones)
 1. **Serial first.** After flashing, the monitor should print `BNO08x ready` then
    `BLE advertising as Left Hand Tracker` (or `Right Hand Tracker`, per `IS_LEFT_HAND`). If you want to
    eyeball the quaternion, temporarily add a `Serial.printf` of `pkt.w/x/y/z` in `loop()`.
+   (With the display sketch, the OLED shows the same bring-up states on the board itself —
+   `Starting...` → `BLE advertising` → live data, or `BNO085 NOT FOUND` on a wiring fault.)
 2. **Verify BLE with a scanner.** Use **nRF Connect** (iOS/Android) — confirm devices named
    `Left Hand Tracker` / `Right Hand Tracker` advertising service `4F7A0001-…`, subscribe to char
    `4F7A0002-…`, and watch 32-byte notifications arrive. Bytes 0–15 are the quaternion floats
    (little-endian). With both boards flashed, both names should appear.
-3. **Then connect the Vision Pro app.**
+3. **Verify both devices end-to-end with the PC dashboard** (`../pc_dashboard/`) — connects to both
+   boards and shows two live 3D cubes + the numbers. Full test checklist in its README. Remember a
+   board holds ONE central: disconnect nRF Connect / the dashboard before connecting anything else.
+4. **Then connect the Vision Pro app.**
 
 ## Packet format (must match the app)
 | Offset | Type     | Field                |
