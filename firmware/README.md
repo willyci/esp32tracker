@@ -46,20 +46,24 @@ your board differs.
 
 ### OLED (display sketch only)
 
-The display sketch adds a 128x64 OLED (GME12864 / SSD1306) on a **separate software-I2C bus**, so its
-slow bitbanged refresh can never stall the sensor bus:
+The display sketch adds a 128x64 OLED (GME12864 / SSD1306) on the **same hardware I2C bus as the
+BNO085** — they coexist by address (OLED `0x3C`, BNO `0x4B`), and the bus runs at 400 kHz:
 
 | OLED | ESP32-C3 SuperMini |
 |------|--------------------|
 | VCC  | 3V3                |
 | GND  | GND                |
-| SDA  | GPIO3              |
-| SCL  | GPIO4              |
+| SDA  | GPIO0 (shared with BNO085 SDA) |
+| SCL  | GPIO1 (shared with BNO085 SCL) |
+
+> Don't use a separate software-I2C bus for the OLED: a bitbanged full-frame redraw takes hundreds
+> of ms (~1 fps) and blocks the loop, stuttering the 50 Hz BLE stream. On hardware I2C @ 400 kHz a
+> redraw is ~25 ms. (`Wire.setClock(400000)` + `display.setBusClock(400000)` — the latter stops U8g2
+> from dropping the bus back to its 100 kHz default during display transfers.)
 
 Both the BNO085 and the OLED share the 3V3 pin and a common GND (~35 mA total — well within the
 regulator's budget). The screen shows `LEFT`/`RIGHT` + `ADV`/`CONN` + `C:n` (calibration) on top, then
-quaternion w/x/y/z (left column) and accel x/y/z (right column), refreshed at 10 Hz — a full redraw
-over software I2C blocks for tens of ms, so it's throttled to keep the 50 Hz BLE stream steady.
+quaternion w/x/y/z (left column) and accel x/y/z (right column), refreshed at 10 Hz.
 Sanity check: board flat and still → `az` reads ≈ +9.8 (gravity).
 
 If text appears garbled/shifted, the module is the 1.3" **SH1106** variant — swap `SSD1306` → `SH1106`

@@ -7,7 +7,11 @@
 //
 // Wiring (in addition to the BNO085 on GPIO0/1):
 //   OLED VCC → 3V3      OLED GND → GND
-//   OLED SDA → GPIO3    OLED SCL → GPIO4   (software I2C — separate bus from the BNO)
+//   OLED SDA → GPIO0    OLED SCL → GPIO1   (SHARED hardware I2C bus with the BNO085 —
+//                                           different addresses: OLED 0x3C, BNO 0x4B.
+//                                           HW I2C @400kHz redraws in ~25 ms; software
+//                                           I2C on separate pins was ~1 fps and stalled
+//                                           the BLE stream.)
 //
 // Libraries (Arduino Library Manager):
 //   - Adafruit BNO08x
@@ -21,13 +25,10 @@
 #include <NimBLEDevice.h>
 #include <U8g2lib.h>
 
-// ---- I2C pins ----
-static constexpr int PIN_SDA = 0;           // BNO085 (hardware I2C)
+// ---- I2C pins (one shared hardware bus: BNO085 + OLED) ----
+static constexpr int PIN_SDA = 0;
 static constexpr int PIN_SCL = 1;
 static constexpr uint8_t BNO_ADDR = 0x4B;   // this board scans at 0x4B; some use 0x4A
-
-static constexpr int PIN_OLED_SDA = 3;      // OLED (software I2C — own bus, so the
-static constexpr int PIN_OLED_SCL = 4;      // slow bitbang never stalls the sensor)
 
 // ---- BLE identifiers — must match the app exactly ----
 #define SERVICE_UUID      "4F7A0001-9B3E-4C2A-8D1F-0A1B2C3D4E5F"
@@ -57,10 +58,10 @@ static_assert(sizeof(OrientationPacket) == 32, "packet must be 32 bytes");
 Adafruit_BNO08x bno08x;
 sh2_SensorValue_t sensorValue;
 
-// Full-buffer SSD1306 over software I2C. If your module is the 1.3" SH1106 variant
-// (text shows but shifted/garbled), swap SSD1306 → SH1106 in the type name below.
-U8G2_SSD1306_128X64_NONAME_F_SW_I2C display(
-    U8G2_R0, /*SCL=*/ PIN_OLED_SCL, /*SDA=*/ PIN_OLED_SDA, /*reset=*/ U8X8_PIN_NONE);
+// Full-buffer SSD1306 on the shared hardware I2C bus. If your module is the 1.3"
+// SH1106 variant (text shows but shifted/garbled), swap SSD1306 → SH1106 below.
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(
+    U8G2_R0, /*reset=*/ U8X8_PIN_NONE, /*clock=*/ PIN_SCL, /*data=*/ PIN_SDA);
 
 NimBLECharacteristic* orientationChar = nullptr;
 volatile bool deviceConnected = false;
@@ -69,8 +70,8 @@ volatile bool deviceConnected = false;
 static OrientationPacket pkt = { 0, 0, 0, 1, 0, 0, 0, 0, {0, 0, 0} };
 
 // Report cadence: 50 Hz (20 ms). Notify at the same rate. The OLED redraws at 10 Hz —
-// a full sendBuffer() over software I2C blocks for tens of ms, so keep it infrequent
-// enough that the BLE notify cadence stays solid.
+// a full sendBuffer() at 400 kHz HW I2C blocks ~25 ms, so keep it infrequent enough
+// that the BLE notify cadence stays solid.
 static constexpr uint32_t REPORT_INTERVAL_US  = 20000;
 static constexpr uint32_t NOTIFY_INTERVAL_MS  = 20;
 static constexpr uint32_t DISPLAY_INTERVAL_MS = 100;
@@ -171,10 +172,14 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
+  // One shared bus at 400 kHz (both the SSD1306 and BNO085 support fast mode).
+  // setBusClock keeps U8g2 from dropping the bus back to its 100 kHz default
+  // during display transfers, which would slow the sensor traffic too.
+  Wire.begin(PIN_SDA, PIN_SCL);
+  Wire.setClock(400000);
+  display.setBusClock(400000);
   display.begin();
   displayMessage("Starting...", "");
-
-  Wire.begin(PIN_SDA, PIN_SCL);
 
   // The BNO085 doesn't ACK reliably on its first I2C transaction after power-up;
   // give it time to boot, then retry begin_I2C() a few times before giving up.
