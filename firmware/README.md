@@ -4,19 +4,22 @@ Reads the BNO085's fused rotation vector + accelerometer over I2C and streams a 
 packet over BLE notify (~50 Hz) to the visionOS app / PC dashboard. The full build adds a
 status OLED and a SoftPot touch strip.
 
-## Sketches
+## Sketches — one per hand
 
-| Sketch | What it is |
-|--------|-----------|
-| `esp32_tracker/esp32_tracker.ino` | Base tracker — **BNO085 + BLE only**. Smallest, coolest, simplest. |
-| `esp32_tracker_touch_display/esp32_tracker_touch_display.ino` | ⭐ **Full build** — base + status **OLED** + **SoftPot** touch strip (reports the slide start & current points). The recommended sketch. |
+| Sketch | Flash to | Advertises as |
+|--------|----------|---------------|
+| `left/left.ino`   | the **LEFT**-hand board  | `Left Hand Tracker`  |
+| `right/right.ino` | the **RIGHT**-hand board | `Right Hand Tracker` |
 
-(`esp32_tracker_display/` and `esp32_tracker_test_display/` are earlier OLED iterations, superseded by
-`esp32_tracker_touch_display`.)
+Both are the **full build** — BNO085 + BLE + status **OLED** + **SoftPot** touch strip. They're
+identical except one line (`IS_LEFT_HAND`, already preset in each), so flashing is just "open the right
+file and upload" — nothing to edit. They share the same BLE service/characteristic UUIDs; only the
+advertised **name** differs (carried in the scan response), which is how the app/dashboard tell the
+hands apart.
 
-All speak the **identical** BLE protocol (UUIDs + packet below), so the app and PC dashboard work with
-any. Each lives in its own folder because the Arduino IDE concatenates every `.ino` in a folder into one
-build — open each from its own folder.
+> ⚠️ Each `.ino` is in its **own folder** (`left/`, `right/`) on purpose. The Arduino IDE compiles
+> *every* `.ino` in a folder together, so two sketches in one folder collide (duplicate
+> `setup()`/`loop()`/globals → won't build). Rule: **one sketch per folder, folder name = file name.**
 
 ## Wiring (I2C)
 
@@ -114,22 +117,29 @@ download-mode combo; a press while running is fine.)
   │ [USB-C / 5V]                              battery → 5V pin (USB unplugged)
   └────────────────────┘
 ```
-All three peripherals share the **3V3** rail and a common **GND**. The base sketch needs only the
-BNO085 (the top four wires).
+All three peripherals share the **3V3** rail and a common **GND**. For a BNO-only bring-up (skipping
+the OLED/SoftPot), just the top four BNO wires are needed.
 
-## Two boards: left + right hand
+## Flashing (Arduino IDE)
 
-This firmware drives two identical trackers. One line near the top of the sketch picks which hand a
-board is, which sets its advertised BLE name:
+**One-time setup:**
+1. **ESP32 board support** — Boards Manager → "esp32" by Espressif, **version 2.0.17** (the 3.x core
+   crashes with NimBLE 1.4.x at BLE startup: `Guru Meditation` / `MEPC: 0x00000000`).
+2. **Libraries** — install **Adafruit BNO08x**, **NimBLE-Arduino 1.4.x** (NOT 2.x — callback
+   signatures changed), and **U8g2** (by oliver — provides the U8x8 text mode).
+3. Keep the Arduino sketchbook on a plain local path (e.g. `C:\Arduino`) — a OneDrive-synced sketchbook
+   causes random `Permission denied` errors during compile.
 
-```cpp
-#define IS_LEFT_HAND 1   // 1 = "Left Hand Tracker"   |   0 = "Right Hand Tracker"
-```
+**Per board:**
+1. Open **`left/left.ino`** for the left board, or **`right/right.ino`** for the right board.
+2. **Tools →** Board: **ESP32C3 Dev Module** · **USB CDC On Boot: Enabled** · Port: the COM port that
+   appears for this board (unplug/replug to see which one).
+3. Click **Upload**. If it won't connect: hold **BOOT**, replug USB (or tap RESET), release BOOT, retry.
+4. Open **Serial Monitor @ 115200** → you should see `[BNO] ready` then
+   `[BLE] advertising as Left Hand Tracker` (or `Right Hand Tracker`).
 
-Flash board 1 with `1`, change to `0` and flash board 2. Both boards share the **same** service and
-characteristic UUIDs — only the name differs, which is how the app tells them apart. The name is sent
-in the BLE **scan response** (it's too long to fit in the main advertising packet next to the 128-bit
-service UUID), so a scanner shows the full "Left/Right Hand Tracker" name.
+Repeat with the other file on the other board. **Nothing to edit** — `IS_LEFT_HAND` is already baked
+into each file.
 
 ## Troubleshooting
 
@@ -160,24 +170,31 @@ These bit us during first bring-up on a real SuperMini — check here before sus
   stray `pio device monitor`) — only one program can hold the port. After a reset the native-USB port
   may also rename (e.g. `usbmodemXXXX` → `usbmodem101`); PlatformIO auto-detects it.
 
-## Build — PlatformIO (recommended)
+## Run the PC dashboard (test without the Vision Pro)
+
+`../pc_dashboard/` connects to **both** boards over BLE and shows two live 3D cubes + the SoftPot slide
+in your browser — verifies the whole pipeline on a PC (or phone).
+
 ```
-cd firmware
-pio run -t upload
-pio device monitor      # 115200 baud
+cd ../pc_dashboard
+pip install bleak aiohttp        # once
+python tracker_dashboard.py
 ```
 
-## Build — Arduino IDE
-1. Install ESP32 board support (Boards Manager → "esp32" by Espressif, **version 2.0.17** — the
-   3.x core crashes with NimBLE 1.4.x at BLE startup: `Guru Meditation` / `MEPC: 0x00000000`).
-2. Library Manager → install **Adafruit BNO08x** and **NimBLE-Arduino** (use **1.4.x**, not 2.x —
-   the server-callback signatures changed). For the touch+display sketch, also install **U8g2** (by
-   oliver — provides the U8x8 text mode used here).
-3. Open `esp32_tracker/esp32_tracker.ino` (or `esp32_tracker_touch_display/esp32_tracker_touch_display.ino`),
-   select board **ESP32C3 Dev Module**, set **USB CDC On Boot: Enabled** (this resets when you
-   change cores!), set `IS_LEFT_HAND` for the board in hand, upload.
-4. Keep the Arduino sketchbook on a plain local path (e.g. `C:\Arduino`) — a OneDrive-synced
-   sketchbook causes random `Permission denied` errors on library headers during compile.
+It opens **http://localhost:8765** on this PC and also prints a phone URL:
+```
+this PC : http://localhost:8765
+phone   : http://192.168.68.71:8765   (same Wi-Fi — your IP may differ)
+```
+Power on both boards → each card flips *Scanning → Connected*; rotate a sensor → its cube moves; touch
+the SoftPot → the start/current markers track. On a phone, allow the Windows Firewall prompt (Private
+networks) the first time. Full checklist: `../pc_dashboard/README.md`.
+
+> ⚠️ A board accepts only **one** BLE central at a time — disconnect nRF Connect / the Vision Pro app
+> before running the dashboard (and vice-versa).
+>
+> *PlatformIO note:* `platformio.ini` predates the left/right split (its `src_dir` points at a removed
+> folder). Use the Arduino IDE flow above, or point `src_dir` at `left` or `right` per build.
 
 ## Bring-up order (matches SPEC.md milestones)
 1. **Serial first.** After flashing, the monitor should print `BNO08x ready` then
@@ -209,8 +226,7 @@ pio device monitor      # 115200 baud
 | 30     | uint8    | SoftPot touchCurrent (0 = no touch) |
 | 31     | uint8    | touchActive (1 = finger down)       |
 
-(The base `esp32_tracker` sketch leaves bytes 29–31 as 0; consumers that don't use the SoftPot just
-ignore them.)
+(Consumers that don't use the SoftPot just ignore bytes 29–31; an untouched strip sends them as 0.)
 
 ## Notes
 - The **Rotation Vector** report is the magnetometer-fused, drift-corrected one. Calibrate by
