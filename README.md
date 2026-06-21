@@ -20,6 +20,17 @@ by their advertised name (`Left Hand Tracker` / `Right Hand Tracker`).
 > hand is *rotated*, not *where it is*. For hand position on Vision Pro, use ARKit hand tracking. See
 > [SPEC.md](SPEC.md).
 
+## Demo
+
+![Assembled tracker — ESP32-C3 SuperMini, BNO085, OLED, Spectra SoftPot, and a 3.7V LiPo on a breadboard](20260621_011631.jpg)
+
+*Assembled prototype: ESP32-C3 SuperMini + BNO085 IMU + 0.96" OLED + Spectra SoftPot strip + 3.7 V LiPo.*
+
+- ▶ [Hardware demo](20260621_012025.mp4) — the tracker running.
+- ▶ [Dashboard screen recording](Screen_Recording_20260621_011050_Chrome.mp4) — the browser dashboard (live cubes + SoftPot slide).
+
+*(GitHub shows the photo inline and opens the `.mp4` files in its video player when clicked.)*
+
 ## Repository layout
 
 | Path | What it is |
