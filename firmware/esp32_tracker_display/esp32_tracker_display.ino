@@ -12,6 +12,11 @@
 //                                           HW I2C @400kHz redraws in ~25 ms; software
 //                                           I2C on separate pins was ~1 fps and stalled
 //                                           the BLE stream.)
+//   SoftPot pin1 (V+) → 3V3   pin3 (GND) → GND
+//   SoftPot pin2 (wiper) → GPIO3,  AND a 100k resistor from GPIO3 → GND (pulldown, so
+//                                  an untouched strip reads ~0 instead of floating noise).
+//   NOTE: until the SoftPot + 100k are wired, GPIO3 floats and the slide bar/value is
+//         meaningless — harmless, just ignore it. Everything else runs normally.
 //
 // Libraries (Arduino Library Manager):
 //   - Adafruit BNO08x
@@ -29,6 +34,10 @@
 static constexpr int PIN_SDA = 0;
 static constexpr int PIN_SCL = 1;
 static constexpr uint8_t BNO_ADDR = 0x4B;   // this board scans at 0x4B; some use 0x4A
+
+// ---- SoftPot linear strip (analog): wiper on GPIO3 (ADC1), 100k pulldown to GND ----
+static constexpr int PIN_SOFTPOT = 3;
+static constexpr int SOFTPOT_NOTOUCH_RAW = 80;   // raw ADC below this = "no touch"
 
 // ---- BLE identifiers — must match the app exactly ----
 #define SERVICE_UUID      "4F7A0001-9B3E-4C2A-8D1F-0A1B2C3D4E5F"
@@ -51,7 +60,8 @@ struct __attribute__((packed)) OrientationPacket {
   float   w, x, y, z;     // quaternion (real, i, j, k)
   float   ax, ay, az;     // accel, m/s^2
   uint8_t calib;          // 0–3
-  uint8_t pad[3];
+  uint8_t touch;          // SoftPot position: 0 = no touch, 1–255 = position. (was pad[0])
+  uint8_t pad[2];
 };
 static_assert(sizeof(OrientationPacket) == 32, "packet must be 32 bytes");
 
@@ -67,14 +77,14 @@ NimBLECharacteristic* orientationChar = nullptr;
 volatile bool deviceConnected = false;
 
 // Latest values, refreshed as reports arrive; sent together on a fixed cadence.
-static OrientationPacket pkt = { 0, 0, 0, 1, 0, 0, 0, 0, {0, 0, 0} };
+static OrientationPacket pkt = { 0, 0, 0, 1, 0, 0, 0, 0, 0, {0, 0} };
 
-// Report cadence: 50 Hz (20 ms). Notify at the same rate. The OLED redraws at 10 Hz —
-// a full sendBuffer() at 400 kHz HW I2C blocks ~25 ms, so keep it infrequent enough
-// that the BLE notify cadence stays solid.
+// Report cadence: 50 Hz (20 ms). Notify at the same rate. At 100 kHz I2C a full OLED
+// redraw blocks ~90 ms, so refresh the screen only ~4x/sec (250 ms) to avoid starving
+// the 50 Hz BLE notify during the redraw.
 static constexpr uint32_t REPORT_INTERVAL_US  = 20000;
 static constexpr uint32_t NOTIFY_INTERVAL_MS  = 20;
-static constexpr uint32_t DISPLAY_INTERVAL_MS = 100;
+static constexpr uint32_t DISPLAY_INTERVAL_MS = 250;
 static uint32_t lastNotifyMs  = 0;
 static uint32_t lastDisplayMs = 0;
 
@@ -165,19 +175,41 @@ void displayData() {
   snprintf(buf, sizeof(buf), "ay%+6.2f", pkt.ay); display.drawStr(68, 39, buf);
   snprintf(buf, sizeof(buf), "az%+6.2f", pkt.az); display.drawStr(68, 51, buf);
 
+  // SoftPot slide position (bottom-right): "S" + a fill bar (empty when not touched).
+  display.drawStr(64, 63, "S");
+  const int bx = 76, by = 56, bw = 50, bh = 7;
+  display.drawFrame(bx, by, bw, bh);
+  int fill = (pkt.touch * (bw - 2)) / 255;
+  if (fill > 0) display.drawBox(bx + 1, by + 1, fill, bh - 2);
+
   display.sendBuffer();
+}
+
+// Read the SoftPot, lightly smoothed (EMA), mapped to 0 (no touch) or 1–255 (position).
+static float softpotEMA = 0;
+uint8_t readSoftPot() {
+  int raw = analogRead(PIN_SOFTPOT);
+  softpotEMA = 0.7f * softpotEMA + 0.3f * raw;     // light smoothing — ADC is noisy
+  int v = (int)softpotEMA;
+  if (v < SOFTPOT_NOTOUCH_RAW) return 0;           // pulldown holds an untouched strip low
+  return (uint8_t)constrain(map(v, SOFTPOT_NOTOUCH_RAW, 4095, 1, 255), 1, 255);
 }
 
 void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // One shared bus at 400 kHz (both the SSD1306 and BNO085 support fast mode).
-  // setBusClock keeps U8g2 from dropping the bus back to its 100 kHz default
-  // during display transfers, which would slow the sensor traffic too.
+  // SoftPot ADC: 12-bit (0–4095), full ~0–3.3 V range on the wiper pin.
+  analogReadResolution(12);
+  analogSetPinAttenuation(PIN_SOFTPOT, ADC_11db);
+
+  // Shared I2C bus at 100 kHz. 400 kHz was unreliable for the BNO085 on breadboard
+  // wiring — begin_I2C() failed ("BNO08x not found") even though esp32_tracker.ino
+  // works fine at the default 100 kHz on the SAME wiring. 100 kHz is robust here.
+  // To run faster later: add 4.7k pull-ups on SDA/SCL and shorten the jumpers.
   Wire.begin(PIN_SDA, PIN_SCL);
-  Wire.setClock(400000);
-  display.setBusClock(400000);
+  Wire.setClock(100000);
+  display.setBusClock(100000);
   display.begin();
   displayMessage("Starting...", "");
 
@@ -235,11 +267,15 @@ void loop() {
 
   const uint32_t now = millis();
 
-  // Notify at a steady cadence (only when someone is listening).
-  if (deviceConnected && orientationChar && (now - lastNotifyMs >= NOTIFY_INTERVAL_MS)) {
+  // At the 50 Hz cadence: sample the SoftPot (always, so the OLED bar stays live even
+  // when disconnected), then notify if someone is listening.
+  if (now - lastNotifyMs >= NOTIFY_INTERVAL_MS) {
     lastNotifyMs = now;
-    orientationChar->setValue(reinterpret_cast<uint8_t*>(&pkt), sizeof(pkt));
-    orientationChar->notify();
+    pkt.touch = readSoftPot();
+    if (deviceConnected && orientationChar) {
+      orientationChar->setValue(reinterpret_cast<uint8_t*>(&pkt), sizeof(pkt));
+      orientationChar->notify();
+    }
   }
 
   // Refresh the OLED at 10 Hz.

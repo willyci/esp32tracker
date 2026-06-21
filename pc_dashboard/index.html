@@ -61,6 +61,17 @@
              text-transform: uppercase; letter-spacing: .04em; padding-top: 10px; }
   .calib { font-weight: 700; }
 
+  /* ---- SoftPot slide track (start marker = green, current = orange) ---- */
+  .softpot { margin-top: 12px; }
+  .sp-label { font-size: 12px; color: #9aa0a8; margin-bottom: 5px; }
+  .sp-track { position: relative; height: 20px; background: #2a2e36;
+              border-radius: 5px; overflow: hidden; }
+  .sp-fill { position: absolute; top: 0; bottom: 0; background: rgba(99,153,34,.30); display: none; }
+  .sp-marker { position: absolute; top: -2px; bottom: -2px; width: 3px;
+               margin-left: -1px; border-radius: 2px; display: none; }
+  .sp-start { background: #4ade80; }   /* where the touch began */
+  .sp-cur   { background: #f97316; }   /* current finger position */
+
   button {
     background: #2a2e36; color: #e8e8ea; border: 1px solid #3a3f49;
     border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer;
@@ -156,6 +167,14 @@ function buildCard(hand) {
       <tr><td class="lbl section">Calib</td>
           <td class="val calib" id="calib-${hand}">0/3</td></tr>
     </table>
+    <div class="softpot">
+      <div class="sp-label">SoftPot — <span id="sp-txt-${hand}">no touch</span></div>
+      <div class="sp-track">
+        <div class="sp-fill"   id="sp-fill-${hand}"></div>
+        <div class="sp-marker sp-start" id="sp-start-${hand}"></div>
+        <div class="sp-marker sp-cur"   id="sp-cur-${hand}"></div>
+      </div>
+    </div>
     <div class="controls">
       <button onclick="recenter('${hand}')">Re-center</button>
     </div>`;
@@ -192,6 +211,26 @@ function render() {
     const calib = document.getElementById(`calib-${hand}`);
     calib.textContent = `${s.calib}/3`;
     calib.style.color = CALIB_COLORS[s.calib] || CALIB_COLORS[0];
+
+    // SoftPot: green marker = where the touch started, orange = current finger position.
+    const spTxt   = document.getElementById(`sp-txt-${hand}`);
+    const spStart = document.getElementById(`sp-start-${hand}`);
+    const spCur   = document.getElementById(`sp-cur-${hand}`);
+    const spFill  = document.getElementById(`sp-fill-${hand}`);
+    if (s.touchActive) {
+      const sp = s.touchStart   / 255 * 100;
+      const cp = s.touchCurrent / 255 * 100;
+      spTxt.textContent = `start ${s.touchStart} · now ${s.touchCurrent} · Δ ${s.touchCurrent - s.touchStart}`;
+      spStart.style.display = spCur.style.display = spFill.style.display = "block";
+      spStart.style.left = sp + "%";
+      spCur.style.left   = cp + "%";
+      const lo = Math.min(sp, cp), hi = Math.max(sp, cp);
+      spFill.style.left  = lo + "%";
+      spFill.style.width = (hi - lo) + "%";
+    } else {
+      spTxt.textContent = "no touch";
+      spStart.style.display = spCur.style.display = spFill.style.display = "none";
+    }
   }
   requestAnimationFrame(render);
 }

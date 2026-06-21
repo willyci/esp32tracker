@@ -13,6 +13,7 @@
 
 import asyncio
 import json
+import socket
 import struct
 import webbrowser
 from pathlib import Path
@@ -31,13 +32,14 @@ HAND_NAMES = {
 }
 
 PORT = 8765
-PACKET = struct.Struct("<7fB3x")          # w x y z ax ay az calib (+3 pad) = 32 bytes
+PACKET = struct.Struct("<7f4B")           # w x y z ax ay az, calib, touchStart, touchCurrent, touchActive = 32 bytes
 BROADCAST_INTERVAL = 1 / 30               # UI doesn't need the firmware's full 50 Hz
 
 # Latest known state per hand, broadcast as-is to the browser.
 state = {
     hand: {"connected": False, "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0,
-           "ax": 0.0, "ay": 0.0, "az": 0.0, "calib": 0}
+           "ax": 0.0, "ay": 0.0, "az": 0.0, "calib": 0,
+           "touchStart": 0, "touchCurrent": 0, "touchActive": 0}
     for hand in HAND_NAMES
 }
 busy: set[str] = set()                    # hands currently connecting/connected
@@ -47,8 +49,9 @@ websockets: set[web.WebSocketResponse] = set()
 def on_packet(hand: str, data: bytearray) -> None:
     if len(data) < PACKET.size:
         return
-    w, x, y, z, ax, ay, az, calib = PACKET.unpack(bytes(data[:PACKET.size]))
-    state[hand].update(w=w, x=x, y=y, z=z, ax=ax, ay=ay, az=az, calib=calib)
+    w, x, y, z, ax, ay, az, calib, tStart, tCur, tActive = PACKET.unpack(bytes(data[:PACKET.size]))
+    state[hand].update(w=w, x=x, y=y, z=z, ax=ax, ay=ay, az=az, calib=calib,
+                       touchStart=tStart, touchCurrent=tCur, touchActive=tActive)
 
 
 async def serve_device(hand: str, device) -> None:
@@ -121,6 +124,18 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+def lan_ip() -> str:
+    """Best-effort LAN IP of this machine (for reaching the dashboard from a phone)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))   # no packets sent; just selects the outbound interface
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
 async def main() -> None:
     app = web.Application()
     app.router.add_get("/", handle_index)
@@ -128,12 +143,17 @@ async def main() -> None:
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "localhost", PORT)
+    # Bind to 0.0.0.0 so phones/tablets on the same Wi-Fi can reach it — not just this PC.
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-    url = f"http://localhost:{PORT}"
-    print(f"Dashboard running at {url}  (Ctrl+C to stop)")
-    webbrowser.open(url)
+    local_url = f"http://localhost:{PORT}"
+    phone_url = f"http://{lan_ip()}:{PORT}"
+    print("Dashboard running:")
+    print(f"  this PC : {local_url}")
+    print(f"  phone   : {phone_url}   (same Wi-Fi)")
+    print("  (Ctrl+C to stop)")
+    webbrowser.open(local_url)
 
     await asyncio.gather(scan_loop(), broadcast_loop())
 

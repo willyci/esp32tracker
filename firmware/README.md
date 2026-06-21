@@ -1,18 +1,22 @@
-# Firmware — ESP32-C3 + BNO085
+# Firmware — ESP32-C3 + BNO085 (+ OLED + SoftPot)
 
 Reads the BNO085's fused rotation vector + accelerometer over I2C and streams a 32-byte
-packet over BLE notify (~50 Hz) to the visionOS app.
+packet over BLE notify (~50 Hz) to the visionOS app / PC dashboard. The full build adds a
+status OLED and a SoftPot touch strip.
 
-## Two sketches
+## Sketches
 
 | Sketch | What it is |
 |--------|-----------|
-| `esp32_tracker/esp32_tracker.ino` | The base tracker (no display). |
-| `esp32_tracker_display/esp32_tracker_display.ino` | Same tracker + a 128x64 OLED showing hand, BLE state, calibration, quaternion, and accel — live, no serial monitor needed. Use this for untethered/battery boards. |
+| `esp32_tracker/esp32_tracker.ino` | Base tracker — **BNO085 + BLE only**. Smallest, coolest, simplest. |
+| `esp32_tracker_touch_display/esp32_tracker_touch_display.ino` | ⭐ **Full build** — base + status **OLED** + **SoftPot** touch strip (reports the slide start & current points). The recommended sketch. |
 
-Both speak the **identical** BLE protocol (UUIDs + packet below), so the visionOS app and the PC
-dashboard work with either. They live in separate folders because the Arduino IDE concatenates every
-`.ino` in a sketch folder into one build — open each from its own folder.
+(`esp32_tracker_display/` and `esp32_tracker_test_display/` are earlier OLED iterations, superseded by
+`esp32_tracker_touch_display`.)
+
+All speak the **identical** BLE protocol (UUIDs + packet below), so the app and PC dashboard work with
+any. Each lives in its own folder because the Arduino IDE concatenates every `.ino` in a folder into one
+build — open each from its own folder.
 
 ## Wiring (I2C)
 
@@ -44,30 +48,74 @@ strapping pins, so GPIO0/1 are the cleaner choice for I2C. Confirm against your 
 SuperMini clones vary. The pins are set in the sketch (`PIN_SDA` / `PIN_SCL`), so change them there if
 your board differs.
 
-### OLED (display sketch only)
+## Full build — OLED + SoftPot (touch_display sketch)
 
-The display sketch adds a 128x64 OLED (GME12864 / SSD1306) on the **same hardware I2C bus as the
-BNO085** — they coexist by address (OLED `0x3C`, BNO `0x4B`), and the bus runs at 400 kHz:
+The full sketch adds a **128x64 OLED** and a **SoftPot** linear touch strip. Both go on their *own*
+pins — **not** the BNO's I2C bus.
 
-| OLED | ESP32-C3 SuperMini |
-|------|--------------------|
-| VCC  | 3V3                |
-| GND  | GND                |
-| SDA  | GPIO0 (shared with BNO085 SDA) |
-| SCL  | GPIO1 (shared with BNO085 SCL) |
+### OLED — software I2C on GPIO5 / GPIO21
 
-> Don't use a separate software-I2C bus for the OLED: a bitbanged full-frame redraw takes hundreds
-> of ms (~1 fps) and blocks the loop, stuttering the 50 Hz BLE stream. On hardware I2C @ 400 kHz a
-> redraw is ~25 ms. (`Wire.setClock(400000)` + `display.setBusClock(400000)` — the latter stops U8g2
-> from dropping the bus back to its 100 kHz default during display transfers.)
+| OLED (GME12864 / SSD1306) | ESP32-C3 |
+|------|------|
+| VCC  | 3V3   |
+| GND  | GND   |
+| SDA  | **GPIO5**  |
+| SCL  | **GPIO21** |
 
-Both the BNO085 and the OLED share the 3V3 pin and a common GND (~35 mA total — well within the
-regulator's budget). The screen shows `LEFT`/`RIGHT` + `ADV`/`CONN` + `C:n` (calibration) on top, then
-quaternion w/x/y/z (left column) and accel x/y/z (right column), refreshed at 10 Hz.
-Sanity check: board flat and still → `az` reads ≈ +9.8 (gravity).
+> ⚠️ **Why software I2C on its own pins, not the BNO's hardware bus?** We tried the OLED on the shared
+> GPIO0/1 hardware bus — U8g2/U8x8's hardware-I2C would **not coexist** with the Adafruit BNO library
+> (OLED stayed blank / `begin()` hung). Bit-banged **software** I2C on separate pins (GPIO5/21) never
+> touches the BNO's hardware I2C peripheral, and just works. (The C3 has only one hardware I2C
+> controller — an S3 with two would let both be hardware I2C; not needed here.)
+>
+> GPIO21 is free because `Serial` runs over USB-CDC, not the UART0 pins.
 
-If text appears garbled/shifted, the module is the 1.3" **SH1106** variant — swap `SSD1306` → `SH1106`
-in the display constructor (noted in the sketch).
+The screen shows `LEFT`/`RIGHT` + `ADV`/`CONN` + `C:n` (calib), quaternion w/x/y/z, and the SoftPot
+`St`/`Cu` points. It **wakes for `SCREEN_ON_MS` (10 s) on power-up or a BOOT press, then auto-offs** —
+keeping the slow software-I2C redraw from stuttering BLE the rest of the time. Sanity check: board flat
+and still → `az ≈ +9.8` (gravity). If text is garbled/shifted, it's the 1.3" **SH1106** variant — swap
+`SSD1306` → `SH1106` in the display constructor.
+
+### SoftPot — analog on GPIO3 (+ 100k pulldown)
+
+| SoftPot (Spectra, 3 solder tabs) | ESP32-C3 |
+|------|------|
+| Pin 1 (V+, end)     | 3V3 |
+| Pin 2 (wiper, MIDDLE) | **GPIO3** |
+| Pin 3 (GND, end)    | GND |
+| **100 kΩ** | from **GPIO3 → GND** (pulldown) |
+
+The **100k pulldown is required** — without it an untouched strip floats and reads noise. GPIO3 (not
+GPIO2) because GPIO2 is a boot **strapping** pin, and the pulldown would hold it LOW at boot. The
+firmware captures the **start** point on touch-down and tracks the **current** point as you slide
+(reset on release) — the start↔current Δ is the slide/advance gesture.
+
+### BOOT button (GPIO9)
+Built into the board. A press wakes the OLED for 10 s. (Don't *hold* it during power-up — that's the
+download-mode combo; a press while running is fine.)
+
+### Full wiring diagram (touch_display)
+```
+   ESP32-C3 SuperMini
+  ┌────────────────────┐
+  │ 3V3 ●──┬─────────────────► BNO085 VIN
+  │        ├─────────────────► OLED VCC
+  │        └─────────────────► SoftPot Pin1 (V+)
+  │ GND ●──┬─────────────────► BNO085 GND
+  │        ├─────────────────► OLED GND
+  │        └─────────────────► SoftPot Pin3 (GND)
+  │GPIO0 ●───────────────────► BNO085 SDA  ┐ hardware I2C (0x4B)
+  │GPIO1 ●───────────────────► BNO085 SCL  ┘
+  │GPIO5 ●───────────────────► OLED SDA    ┐ software I2C (0x3C)
+  │GPIO21●───────────────────► OLED SCL    ┘
+  │GPIO3 ●──┬────────────────► SoftPot Pin2 (wiper)   ← ADC
+  │         └──[100kΩ]──► GND  (pulldown on the wiper node)
+  │GPIO9 ●  BOOT button (on-board) → wakes OLED
+  │ [USB-C / 5V]                              battery → 5V pin (USB unplugged)
+  └────────────────────┘
+```
+All three peripherals share the **3V3** rail and a common **GND**. The base sketch needs only the
+BNO085 (the top four wires).
 
 ## Two boards: left + right hand
 
@@ -123,8 +171,9 @@ pio device monitor      # 115200 baud
 1. Install ESP32 board support (Boards Manager → "esp32" by Espressif, **version 2.0.17** — the
    3.x core crashes with NimBLE 1.4.x at BLE startup: `Guru Meditation` / `MEPC: 0x00000000`).
 2. Library Manager → install **Adafruit BNO08x** and **NimBLE-Arduino** (use **1.4.x**, not 2.x —
-   the server-callback signatures changed). For the display sketch, also install **U8g2** (by oliver).
-3. Open `esp32_tracker/esp32_tracker.ino` (or `esp32_tracker_display/esp32_tracker_display.ino`),
+   the server-callback signatures changed). For the touch+display sketch, also install **U8g2** (by
+   oliver — provides the U8x8 text mode used here).
+3. Open `esp32_tracker/esp32_tracker.ino` (or `esp32_tracker_touch_display/esp32_tracker_touch_display.ino`),
    select board **ESP32C3 Dev Module**, set **USB CDC On Boot: Enabled** (this resets when you
    change cores!), set `IS_LEFT_HAND` for the board in hand, upload.
 4. Keep the Arduino sketchbook on a plain local path (e.g. `C:\Arduino`) — a OneDrive-synced
@@ -156,7 +205,12 @@ pio device monitor      # 115200 baud
 | 20     | float32  | accel y              |
 | 24     | float32  | accel z              |
 | 28     | uint8    | calibration 0–3      |
-| 29–31  | uint8[3] | padding              |
+| 29     | uint8    | SoftPot touchStart (0 = no touch)   |
+| 30     | uint8    | SoftPot touchCurrent (0 = no touch) |
+| 31     | uint8    | touchActive (1 = finger down)       |
+
+(The base `esp32_tracker` sketch leaves bytes 29–31 as 0; consumers that don't use the SoftPot just
+ignore them.)
 
 ## Notes
 - The **Rotation Vector** report is the magnetometer-fused, drift-corrected one. Calibrate by
