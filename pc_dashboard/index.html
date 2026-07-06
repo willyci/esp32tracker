@@ -72,6 +72,12 @@
   .sp-start { background: #4ade80; }   /* where the touch began */
   .sp-cur   { background: #f97316; }   /* current finger position */
 
+  /* ---- shared X-ray state banner (toggled by either hand's button) ---- */
+  #xray-banner { display: inline-block; margin: 2px 0 18px; padding: 9px 20px; border-radius: 10px;
+                 font-size: 16px; font-weight: 700; letter-spacing: .06em; }
+  #xray-banner.xray-off { background: #2a2e36; color: #9aa0a8; }
+  #xray-banner.xray-on  { background: #14532d; color: #4ade80; }   /* green = active */
+
   button {
     background: #2a2e36; color: #e8e8ea; border: 1px solid #3a3f49;
     border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer;
@@ -84,6 +90,8 @@
 <body>
   <h1>ESP32 Hand Trackers</h1>
   <div id="server-status">Connecting to dashboard server…</div>
+
+  <div id="xray-banner" class="xray-off">X-RAY: OFF</div>
 
   <div class="hands">
     <div class="hand-card" id="card-left"></div>
@@ -232,6 +240,13 @@ function render() {
       spStart.style.display = spCur.style.display = spFill.style.display = "none";
     }
   }
+
+  // Single shared X-ray state — toggled by either hand's GPIO6/7 button.
+  const xrayBanner = document.getElementById("xray-banner");
+  const xray = !!latest.xray;
+  xrayBanner.textContent = "X-RAY: " + (xray ? "ON" : "OFF");
+  xrayBanner.className = xray ? "xray-on" : "xray-off";
+
   requestAnimationFrame(render);
 }
 requestAnimationFrame(render);

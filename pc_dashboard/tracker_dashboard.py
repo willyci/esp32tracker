@@ -32,7 +32,7 @@ HAND_NAMES = {
 }
 
 PORT = 8765
-PACKET = struct.Struct("<7f4B")           # w x y z ax ay az, calib, touchStart, touchCurrent, touchActive = 32 bytes
+PACKET = struct.Struct("<7f4B")           # w x y z ax ay az, calib, touchStart, touchCurrent, xrayOn = 32 bytes
 BROADCAST_INTERVAL = 1 / 30               # UI doesn't need the firmware's full 50 Hz
 
 # Latest known state per hand, broadcast as-is to the browser.
@@ -42,16 +42,25 @@ state = {
            "touchStart": 0, "touchCurrent": 0, "touchActive": 0}
     for hand in HAND_NAMES
 }
+master_xray = False                       # single shared X-ray state (either hand's button toggles it)
+last_xray_bit = {hand: 0 for hand in HAND_NAMES}   # per-hand toggle bit, for edge detection
 busy: set[str] = set()                    # hands currently connecting/connected
 websockets: set[web.WebSocketResponse] = set()
 
 
 def on_packet(hand: str, data: bytearray) -> None:
+    global master_xray
     if len(data) < PACKET.size:
         return
-    w, x, y, z, ax, ay, az, calib, tStart, tCur, tActive = PACKET.unpack(bytes(data[:PACKET.size]))
+    w, x, y, z, ax, ay, az, calib, tStart, tCur, xrayBit = PACKET.unpack(bytes(data[:PACKET.size]))
+    # The board flips xrayBit on each button click; toggle the single shared X-ray on ANY change,
+    # so a button on EITHER hand flips it. "Touched" is derived from touchCurrent > 0.
+    if xrayBit != last_xray_bit[hand]:
+        last_xray_bit[hand] = xrayBit
+        master_xray = not master_xray
+        print(f"[xray] {hand} button -> X-RAY {'ON' if master_xray else 'OFF'}")
     state[hand].update(w=w, x=x, y=y, z=z, ax=ax, ay=ay, az=az, calib=calib,
-                       touchStart=tStart, touchCurrent=tCur, touchActive=tActive)
+                       touchStart=tStart, touchCurrent=tCur, touchActive=1 if tCur > 0 else 0)
 
 
 async def serve_device(hand: str, device) -> None:
@@ -99,7 +108,7 @@ async def scan_loop() -> None:
 async def broadcast_loop() -> None:
     while True:
         if websockets:
-            payload = json.dumps(state)
+            payload = json.dumps({**state, "xray": master_xray})
             await asyncio.gather(
                 *(ws.send_str(payload) for ws in list(websockets)),
                 return_exceptions=True,   # a closing socket shouldn't kill the loop

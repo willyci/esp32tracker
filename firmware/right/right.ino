@@ -9,6 +9,8 @@
 //   BNO085  VIN→3V3  GND→GND  SDA→GPIO0  SCL→GPIO1   (HARDWARE I2C, addr 0x4B)
 //   OLED    VCC→3V3  GND→GND  SDA→GPIO5  SCL→GPIO21  (SOFTWARE I2C — its OWN pins)
 //   SoftPot V+→3V3   GND→GND  wiper→GPIO3  + 100k from GPIO3→GND (pulldown)
+//   X-ray btn: momentary button across GPIO6 & GPIO7 (GPIO7 driven LOW = its ground). Each click
+//              toggles X-ray; the dashboard/app owns the single shared state (either hand flips it).
 //   The OLED is on bit-banged software I2C on separate pins because U8g2/U8x8 hardware
 //   I2C would not coexist with the BNO on the shared GPIO0/1 bus.
 //
@@ -37,6 +39,10 @@ static constexpr int PIN_BOOT = 9;
 static constexpr int PIN_SOFTPOT = 3;
 static constexpr int SOFTPOT_NOTOUCH_RAW = 80;   // raw ADC below this = no touch
 
+// ---- X-ray button: momentary button across GPIO6 & GPIO7 ----
+static constexpr int PIN_XRAY_BTN = 6;   // read with pull-up: LOW = pressed
+static constexpr int PIN_XRAY_GND = 7;   // driven LOW so the button can bridge 6 → 7
+
 // ---- BLE identifiers — must match the app exactly ----
 #define SERVICE_UUID      "4F7A0001-9B3E-4C2A-8D1F-0A1B2C3D4E5F"
 #define ORIENTATION_UUID  "4F7A0002-9B3E-4C2A-8D1F-0A1B2C3D4E5F"
@@ -59,7 +65,8 @@ struct __attribute__((packed)) OrientationPacket {
   uint8_t calib;          // 0–3
   uint8_t touchStart;     // SoftPot position where the touch began (0 = no touch)
   uint8_t touchCurrent;   // current SoftPot position while touched (0 = no touch)
-  uint8_t touchActive;    // 1 = finger down, 0 = released
+  uint8_t xrayOn;         // X-ray toggle: flips 0/1 on each button click. ("Touched" is derivable
+                          // from touchCurrent > 0, so this byte replaced the old touchActive.)
 };
 static_assert(sizeof(OrientationPacket) == 32, "packet must be 32 bytes");
 
@@ -93,6 +100,12 @@ static bool     screenEnabled = true;
 static uint32_t screenOnMs    = 0;     // millis() when the screen was last turned on
 static int      lastBtnState  = HIGH;
 static uint32_t lastBtnMs     = 0;
+
+// X-ray toggle button — sustained-LOW debounce rejects brief touch-noise glitches on GPIO6.
+static bool     xrayState    = false;   // the toggle we report in the packet
+static bool     xrayPressed  = false;   // debounced (confirmed) button state
+static int      xrayRaw      = HIGH;    // last raw pin reading
+static uint32_t xrayRawMs    = 0;       // when the raw reading last changed
 
 // ---------------------------------------------------------------------------
 class ServerCallbacks : public NimBLEServerCallbacks {
@@ -173,7 +186,9 @@ void displayData() {
   snprintf(buf, sizeof(buf), "x %+.3f ", pkt.x);  display.drawString(0, 3, buf);
   snprintf(buf, sizeof(buf), "y %+.3f ", pkt.y);  display.drawString(0, 4, buf);
   snprintf(buf, sizeof(buf), "z %+.3f ", pkt.z);  display.drawString(0, 5, buf);
-  if (pkt.touchActive)
+  snprintf(buf, sizeof(buf), "X-RAY: %s   ", pkt.xrayOn ? "ON " : "OFF");
+  display.drawString(0, 6, buf);
+  if (pkt.touchCurrent > 0)
     snprintf(buf, sizeof(buf), "St%3u Cu%3u", pkt.touchStart, pkt.touchCurrent);
   else
     snprintf(buf, sizeof(buf), "touch: --   ");
@@ -183,16 +198,17 @@ void displayData() {
 // SoftPot: capture the START position on touch-down, track the CURRENT position while
 // touched, and reset BOTH to 0 on release. (Pulldown holds an untouched strip near 0.)
 static float softpotEMA = 0;
+static bool  touching = false;   // internal touch flag (packet no longer carries touchActive)
 void readSoftPot() {
   int raw = analogRead(PIN_SOFTPOT);
   if (raw < SOFTPOT_NOTOUCH_RAW) {                 // released → reset both points
-    pkt.touchActive = 0; pkt.touchStart = 0; pkt.touchCurrent = 0;
+    touching = false; pkt.touchStart = 0; pkt.touchCurrent = 0;
     softpotEMA = 0;
     return;
   }
   uint8_t pos = (uint8_t)constrain(map(raw, SOFTPOT_NOTOUCH_RAW, 4095, 1, 255), 1, 255);
-  if (!pkt.touchActive) {                          // touch-down edge → capture the start point
-    pkt.touchActive = 1;
+  if (!touching) {                                 // touch-down edge → capture the start point
+    touching = true;
     pkt.touchStart = pos;
     softpotEMA = pos;
   } else {
@@ -218,6 +234,26 @@ void handleScreenButton(uint32_t now) {
   }
 }
 
+// X-ray button (across GPIO6/GPIO7): each click TOGGLES X-ray. GPIO7 is driven LOW to act as the
+// button's ground; GPIO6 is read with a pull-up (LOW = pressed). This board just flips its own
+// xrayOn flag; the dashboard/app owns the single shared X-ray and flips it whenever EITHER hand's
+// flag changes — so both hands' buttons do the same thing.
+void handleXrayButton(uint32_t now) {
+  int raw = digitalRead(PIN_XRAY_BTN);
+  if (raw != xrayRaw) { xrayRaw = raw; xrayRawMs = now; }   // raw changed → restart the stability timer
+  // Only accept the level after it's been STABLE for >=40 ms. A brief touch-noise spike never
+  // lasts that long, so it's ignored; a real press (held far longer) is counted once.
+  bool stable = (now - xrayRawMs) >= 40;
+  if (stable && xrayRaw == LOW && !xrayPressed) {          // confirmed press → toggle
+    xrayPressed = true;
+    xrayState = !xrayState;
+    pkt.xrayOn = xrayState ? 1 : 0;
+    Serial.printf(">> X-RAY toggle -> %s\n", xrayState ? "ON" : "OFF");
+  } else if (stable && xrayRaw == HIGH && xrayPressed) {   // confirmed release
+    xrayPressed = false;
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(300);
@@ -225,6 +261,11 @@ void setup() {
   Serial.println("Device: " DEVICE_NAME);
 
   pinMode(PIN_BOOT, INPUT_PULLUP);   // BOOT button wakes the OLED
+
+  // X-ray button across GPIO6/GPIO7: drive GPIO7 LOW as its ground, read GPIO6 with a pull-up.
+  pinMode(PIN_XRAY_GND, OUTPUT);
+  digitalWrite(PIN_XRAY_GND, LOW);
+  pinMode(PIN_XRAY_BTN, INPUT_PULLUP);
 
   // SoftPot ADC on GPIO3: 12-bit, full ~0–3.3 V range.
   analogReadResolution(12);
@@ -297,6 +338,7 @@ void loop() {
   const uint32_t now = millis();
 
   handleScreenButton(now);   // BOOT press wakes the OLED
+  handleXrayButton(now);     // GPIO6/7 button toggles X-ray
 
   // Auto-off the screen SCREEN_ON_MS after it was last turned on.
   if (screenEnabled && (now - screenOnMs >= SCREEN_ON_MS)) {
@@ -325,9 +367,9 @@ void loop() {
   // Heartbeat log once a second — only when the screen is on (keeps "screen off" minimal).
   if (screenEnabled && now - lastLogMs >= STATUS_LOG_INTERVAL_MS) {
     lastLogMs = now;
-    Serial.printf("[status] %s oled=%s touch(a=%u s=%u c=%u) q=%.2f,%.2f,%.2f,%.2f calib=%u\n",
+    Serial.printf("[status] %s oled=%s xray=%u touch(s=%u c=%u) q=%.2f,%.2f,%.2f,%.2f calib=%u\n",
                   deviceConnected ? "CONN" : "ADV", oledOK ? "ok" : "--",
-                  pkt.touchActive, pkt.touchStart, pkt.touchCurrent,
+                  pkt.xrayOn, pkt.touchStart, pkt.touchCurrent,
                   pkt.w, pkt.x, pkt.y, pkt.z, pkt.calib);
   }
 
