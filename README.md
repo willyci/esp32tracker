@@ -22,14 +22,28 @@ by their advertised name (`Left Hand Tracker` / `Right Hand Tracker`).
 
 ## Demo
 
-![Assembled tracker — ESP32-C3 SuperMini, BNO085, OLED, Spectra SoftPot, and a 3.7V LiPo on a breadboard](20260621_011631.jpg)
+![Glove-mounted tracker — breadboard with ESP32-C3 SuperMini, BNO08x, OLED and LiPo on the back of the hand, SoftPot strip taped along the index finger](20260707_215921.jpg)
 
-*Assembled prototype: ESP32-C3 SuperMini + BNO085 IMU + 0.96" OLED + Spectra SoftPot strip + 3.7 V LiPo.*
+*Wearable prototype: the whole tracker rides on the back of a glove — ESP32-C3 SuperMini + BNO08x IMU +
+0.96" OLED + 3.7 V LiPo on a mini breadboard, with the SoftPot touch strip taped along the index finger
+(slide a fingertip on it to grab/twist the catheter or wire in the Vision Pro app).*
 
-- ▶ [Hardware demo](20260621_012025.mp4) — the tracker running.
+- ▶ [**ESP32 tracker demo**](ESP32_tracker.mp4) — the glove tracker driving the system.
+- ▶ [Hardware demo](20260621_012025.mp4) — the earlier breadboard tracker running.
 - ▶ [Dashboard screen recording](Screen_Recording_20260621_011050_Chrome.mp4) — the browser dashboard (live cubes + SoftPot slide).
 
-*(GitHub shows the photo inline and opens the `.mp4` files in its video player when clicked.)*
+### More photos
+
+| | | |
+|---|---|---|
+| ![Build photo](20260707_215846.jpg) | ![Build photo](20260707_215855.jpg) | ![Build photo](20260707_215927.jpg) |
+| ![Build photo](20260707_215935.jpg) | ![Build photo](20260707_215944.jpg) | ![Build photo](20260707_215951.jpg) |
+
+![First breadboard prototype](20260621_011631.jpg)
+
+*The first (pre-glove) breadboard prototype.*
+
+*(GitHub shows the photos inline and opens the `.mp4` files in its video player when clicked.)*
 
 ## Repository layout
 
@@ -43,14 +57,20 @@ by their advertised name (`Left Hand Tracker` / `Right Hand Tracker`).
 
 ## Hardware
 
-Two identical trackers (one per hand), each:
+Two identical trackers (one per hand), each mounted on the back of a glove:
 
 - **ESP32-C3 SuperMini** — chosen because it has **BLE** (the WiFi-only D1 Mini can't talk to Vision Pro).
 - **BNO085** IMU over I2C (SDA = GPIO0, SCL = GPIO1) — fused, drift-corrected orientation. (A
   BNO055 / DFRobot SEN0253 also works with a library swap.)
+- **SoftPot touch strip** along the index finger (wiper on GPIO3) — reports the touch **start** point and
+  **current** point; the app uses touch = grab and slide = twist.
+- **X-ray toggle button** (GPIO6/7) — flips a bit in the packet; either hand's button toggles the app's
+  shared X-ray view.
+- **0.96" OLED** status display (software I2C on GPIO5/21) — wakes on the BOOT button, auto-offs after 10 s.
+- **3.7 V LiPo** for untethered use.
 
-The same sketch flashes both; one `#define IS_LEFT_HAND` line picks the hand (and the BLE name). Wiring
-and the two-board flashing steps are in [`firmware/README.md`](firmware/README.md).
+The left/right sketches differ by one `#define IS_LEFT_HAND` line (which picks the BLE name). Wiring
+and flashing steps are in [`firmware/README.md`](firmware/README.md).
 
 ## Quick start
 
@@ -79,8 +99,11 @@ buttons (per hand, or "Re-center both").
 
 ## Status
 
-Prototype / v0. Working toward the milestones in [`SPEC.md`](SPEC.md):
-connect → display raw data → rotate an object. Position tracking and a real probe model are future work.
+Working prototype. Milestones reached (see [`SPEC.md`](SPEC.md)): connect → display raw data → rotate
+objects → SoftPot touch events + X-ray button → **catheter/wire simulation** (the app opens an immersive
+space where the SoftPot grabs, strip-slide + tracker roll twists, and Vision Pro hand tracking
+advances/retracts a catheter and guidewire — the same interaction model as the VascCath trainer).
+IMU-based position tracking remains out of scope.
 
 ## Notes
 
@@ -88,5 +111,5 @@ connect → display raw data → rotate an object. Position tracking and a real 
   artifact and is git-ignored. Edit the yml and re-run `xcodegen generate` rather than changing
   project settings in Xcode's UI.
 - BLE UUIDs and the 32-byte packet layout are defined once in [`SPEC.md`](SPEC.md) and must match in
-  both `firmware/esp32_tracker/esp32_tracker.ino` and `ESP32Tracker/TrackerState.swift` (packet
-  parsing) / `ESP32Tracker/BLEManager.swift` (UUIDs).
+  the firmware (`firmware/left/left.ino`, `firmware/right/right.ino`) and the app
+  (`ESP32Tracker/TrackerState.swift` for packet parsing, `ESP32Tracker/BLEManager.swift` for UUIDs).
