@@ -20,6 +20,10 @@ final class BLEManager: NSObject, ObservableObject {
 
     @Published private(set) var bluetoothReady = false
 
+    /// Single shared X-ray state — the button on EITHER hand toggles it (each board just
+    /// flips its packet bit per click; we own the actual on/off, like the PC dashboard).
+    @Published private(set) var xrayOn = false
+
     // MARK: Core Bluetooth plumbing
     private var central: CBCentralManager!
     /// Strong refs to the peripherals we're connected/connecting to, keyed by hand.
@@ -29,8 +33,14 @@ final class BLEManager: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        // Either hand's hardware button toggles the one shared X-ray state.
+        left.onXrayToggle  = { [weak self] in self?.toggleXray() }
+        right.onXrayToggle = { [weak self] in self?.toggleXray() }
         central = CBCentralManager(delegate: self, queue: nil)
     }
+
+    /// Flip the shared X-ray state (hardware buttons and the UI button both land here).
+    func toggleXray() { xrayOn.toggle() }
 
     func state(for hand: Hand) -> TrackerState { hand == .left ? left : right }
 

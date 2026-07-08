@@ -35,6 +35,10 @@ enum ConnectionState: String {
 ///   [0..16)  quaternion w,x,y,z (float32 each)
 ///   [16..28) accel x,y,z (float32 each, m/s²)
 ///   [28]     calibration status 0–3 (uint8)
+///   [29]     SoftPot touch START position, 1–255 (0 = not touched)
+///   [30]     SoftPot touch CURRENT position, 1–255 (0 = not touched)
+///   [31]     X-ray toggle bit — the board FLIPS it on each button click; the app
+///            toggles its single shared X-ray state on any change (either hand)
 final class TrackerState: ObservableObject, Identifiable {
     let hand: Hand
     var id: Hand { hand }
@@ -43,6 +47,19 @@ final class TrackerState: ObservableObject, Identifiable {
     @Published private(set) var quaternion = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) // raw, sensor frame
     @Published private(set) var accel = SIMD3<Float>(0, 0, 0)
     @Published private(set) var calibration: UInt8 = 0
+    @Published private(set) var touchStart: UInt8 = 0     // where the finger landed (0 = no touch)
+    @Published private(set) var touchCurrent: UInt8 = 0   // where the finger is now  (0 = no touch)
+
+    var touchActive: Bool { touchCurrent > 0 }
+    /// Signed slide distance since touch-down, in SoftPot units (−254…254).
+    var touchDelta: Int { Int(touchCurrent) - Int(touchStart) }
+
+    /// Fired when this hand's X-ray button bit flips; BLEManager toggles the shared state.
+    var onXrayToggle: (() -> Void)?
+    private var lastXrayBit: UInt8 = 0
+
+    /// Fired after every parsed packet — SimulationModel consumes samples from here.
+    var onSample: ((TrackerState) -> Void)?
 
     // MARK: Orientation shaping (identical math to the original single-device app)
 
@@ -71,7 +88,7 @@ final class TrackerState: ObservableObject, Identifiable {
 
     /// Parse one 32-byte notification and publish the new values.
     func ingest(_ data: Data) {
-        guard data.count >= 29 else { return }
+        guard data.count >= 32 else { return }
         let w = data.readFloat(at: 0)
         let x = data.readFloat(at: 4)
         let y = data.readFloat(at: 8)
@@ -81,6 +98,18 @@ final class TrackerState: ObservableObject, Identifiable {
         quaternion  = simd_quatf(ix: -x, iy: y, iz: -z, r: w)   // (x, y, z, w) arg order
         accel       = SIMD3<Float>(data.readFloat(at: 16), data.readFloat(at: 20), data.readFloat(at: 24))
         calibration = data[data.startIndex + 28]
+        touchStart  = data[data.startIndex + 29]
+        touchCurrent = data[data.startIndex + 30]
+
+        // Same edge-detection as the PC dashboard: the board flips this bit on each
+        // click; ANY change means "the button was pressed" → toggle the shared X-ray.
+        let xrayBit = data[data.startIndex + 31]
+        if xrayBit != lastXrayBit {
+            lastXrayBit = xrayBit
+            onXrayToggle?()
+        }
+
+        onSample?(self)
     }
 }
 

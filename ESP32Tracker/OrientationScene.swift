@@ -11,6 +11,8 @@ import UIKit
 struct OrientationScene: View {
     @ObservedObject var left: TrackerState
     @ObservedObject var right: TrackerState
+    /// Shared X-ray state (from BLEManager): ON renders both cubes see-through.
+    var xrayOn: Bool
 
     var body: some View {
         RealityView { content in
@@ -22,11 +24,14 @@ struct OrientationScene: View {
             rightEntity.position = [0.18, 0, 0]          // right side
             content.add(rightEntity)
         } update: { content in
+            let opacity: Float = xrayOn ? 0.3 : 1.0      // X-ray = see-through cubes
             if let l = content.entities.first(where: { $0.name == "left" }) {
                 l.orientation = left.displayOrientation
+                l.components.set(OpacityComponent(opacity: opacity))
             }
             if let r = content.entities.first(where: { $0.name == "right" }) {
                 r.orientation = right.displayOrientation
+                r.components.set(OpacityComponent(opacity: opacity))
             }
         }
     }

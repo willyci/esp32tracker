@@ -2,16 +2,56 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var ble: BLEManager
+    @EnvironmentObject var sim: SimulationModel
+    @Environment(\.openImmersiveSpace) private var openImmersiveSpace
+    @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
+    @State private var simOpen = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 28) {
-            OrientationScene(left: ble.left, right: ble.right)
-                .frame(minWidth: 420, minHeight: 380)
+            OrientationScene(left: ble.left, right: ble.right, xrayOn: ble.xrayOn)
+                .frame(minWidth: 760, minHeight: 380)   // wide enough for both cubes + spin room
                 .glassBackgroundEffect()
 
             VStack(spacing: 18) {
-                TrackerPanel(tracker: ble.left, color: .teal)      // matches the teal cube
-                TrackerPanel(tracker: ble.right, color: .purple)   // matches the purple cube
+                // Shared X-ray state — either hand's hardware button (or a tap here) flips it.
+                Button {
+                    ble.toggleXray()
+                } label: {
+                    Label(ble.xrayOn ? "X-RAY: ON" : "X-RAY: OFF",
+                          systemImage: ble.xrayOn ? "eye" : "eye.slash")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(ble.xrayOn ? .green : .gray)
+
+                // Catheter/wire simulation: grab = SoftPot touch, twist = slide + roll,
+                // insertion = hand movement (needs the immersive space for hand tracking).
+                Button {
+                    Task {
+                        if simOpen {
+                            await dismissImmersiveSpace()
+                            simOpen = false
+                        } else if await openImmersiveSpace(id: "simulation") == .opened {
+                            simOpen = true
+                        }
+                    }
+                } label: {
+                    Label(simOpen ? "Exit Simulation" : "Enter Simulation",
+                          systemImage: "hand.point.up.left.and.text")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+
+                SimToolRow(name: "Catheter (L)", color: .teal, tool: sim.catheter)
+                SimToolRow(name: "Wire (R)", color: .purple, tool: sim.wire)
+
+                // Side by side so the whole column fits on screen without resizing.
+                HStack(alignment: .top, spacing: 18) {
+                    TrackerPanel(tracker: ble.left, color: .teal)      // matches the teal cube
+                    TrackerPanel(tracker: ble.right, color: .purple)   // matches the purple cube
+                }
 
                 HStack(spacing: 12) {
                     Button("Scan") { ble.startScan() }
@@ -22,9 +62,40 @@ struct ContentView: View {
 
                 Spacer()
             }
-            .frame(width: 320)
+            .frame(width: 640)
         }
         .padding(28)
+        .task {
+            // Open the catheter/wire simulation immediately on launch — no extra step.
+            if !simOpen, await openImmersiveSpace(id: "simulation") == .opened {
+                simOpen = true
+            }
+        }
+    }
+}
+
+/// One line per simulated tool: grab state, insertion depth, accumulated twist.
+struct SimToolRow: View {
+    let name: String
+    let color: Color
+    let tool: SimulationModel.Tool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle().fill(color).frame(width: 10, height: 10)
+            Text(name).font(.callout.bold())
+            Spacer()
+            Text(tool.grabbed ? "grabbed" : "released")
+                .font(.caption)
+                .foregroundStyle(tool.grabbed ? .green : .secondary)
+            Text(String(format: "%.1f cm", tool.insertion * 100))
+                .font(.caption).monospacedDigit()
+            Text(String(format: "%+.0f°", tool.twist * 180 / .pi))
+                .font(.caption).monospacedDigit()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -56,6 +127,15 @@ struct TrackerPanel: View {
             row("y", tracker.accel.y)
             row("z", tracker.accel.z)
 
+            Text("SoftPot").font(.subheadline.bold())
+            if tracker.touchActive {
+                Text("start \(tracker.touchStart) · now \(tracker.touchCurrent) · Δ \(tracker.touchDelta, format: .number.sign(strategy: .always()))")
+                    .font(.callout).monospacedDigit()
+            } else {
+                Text("no touch").font(.callout).foregroundStyle(.secondary)
+            }
+            SoftPotBar(start: tracker.touchStart, current: tracker.touchCurrent)
+
             HStack {
                 Text("Calibration: \(tracker.calibration)/3")
                     .font(.caption).foregroundStyle(.secondary)
@@ -66,6 +146,30 @@ struct TrackerPanel: View {
         }
         .padding(16)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// The touch strip: green dot = where the touch began, orange dot = finger now.
+    /// Both hide when the strip isn't touched (positions are 0).
+    private struct SoftPotBar: View {
+        let start: UInt8
+        let current: UInt8
+
+        var body: some View {
+            GeometryReader { geo in
+                let usable = geo.size.width - 12   // keep the dots inside the track
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.quaternary).frame(height: 6)
+                    if current > 0 {
+                        Circle().fill(.green).frame(width: 12, height: 12)
+                            .offset(x: CGFloat(start) / 255 * usable)
+                        Circle().fill(.orange).frame(width: 12, height: 12)
+                            .offset(x: CGFloat(current) / 255 * usable)
+                    }
+                }
+                .frame(width: geo.size.width, height: geo.size.height)
+            }
+            .frame(height: 14)
+        }
     }
 
     private func row(_ label: String, _ value: Float) -> some View {
@@ -82,6 +186,8 @@ struct TrackerPanel: View {
 }
 
 #Preview(windowStyle: .automatic) {
+    let ble = BLEManager()
     ContentView()
-        .environmentObject(BLEManager())
+        .environmentObject(ble)
+        .environmentObject(SimulationModel(ble: ble))
 }
