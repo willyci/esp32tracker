@@ -72,6 +72,14 @@
   .sp-start { background: #4ade80; }   /* where the touch began */
   .sp-cur   { background: #f97316; }   /* current finger position */
 
+  /* ---- foot pedals + X-ray screen capture ---- */
+  #pedals { display: flex; align-items: center; gap: 10px; margin: 0 0 18px; }
+  .pedal-lbl { font-size: 13px; color: #9aa0a8; }
+  #capture-flash { position: fixed; inset: 0; background: #fff; opacity: 0;
+                   pointer-events: none; z-index: 10; }
+  #capture-flash.fire { animation: capflash .35s ease-out; }
+  @keyframes capflash { 0% { opacity: .85; } 100% { opacity: 0; } }
+
   /* ---- shared X-ray state banner (toggled by either hand's button) ---- */
   #xray-banner { display: inline-block; margin: 2px 0 18px; padding: 9px 20px; border-radius: 10px;
                  font-size: 16px; font-weight: 700; letter-spacing: .06em; }
@@ -85,6 +93,45 @@
   button:hover { background: #343945; }
   .controls { margin-top: 14px; display: flex; gap: 10px; }
   #recenter-all { margin-top: 20px; }
+
+  /* ---- catheter/guidewire simulation (mirrors ESP32Tracker/SimulationModel.swift) ---- */
+  .sim-card { background: #1d2026; border: 1px solid #2a2e36; border-radius: 14px;
+              padding: 20px; margin-top: 28px; max-width: 788px; }
+  .sim-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .sim-title { font-size: 17px; font-weight: 600; flex: 1; }
+  .sim-hint { font-size: 12.5px; color: #9aa0a8; margin-bottom: 14px; line-height: 1.5; }
+  .sim-hint b { color: #c9ced6; }
+
+  .sim-scene { position: relative; height: 90px; background: #171a1f;
+               border: 1px solid #2a2e36; border-radius: 10px; overflow: hidden; }
+  .sim-vessel { position: absolute; top: 50%; height: 30px; margin-top: -15px;
+                background: rgba(140,148,160,.16); border: 1px solid rgba(140,148,160,.25);
+                border-radius: 15px; }
+  .sim-hub { position: absolute; top: 50%; width: 10px; height: 40px; margin-top: -20px;
+             background: #3a3f49; border-radius: 3px; }
+  .sim-rod { position: absolute; top: 50%; border-radius: 8px;
+             transition: box-shadow .15s; }
+  .sim-catheter { height: 16px; margin-top: -8px;
+    background: repeating-linear-gradient(45deg,
+      rgba(13,148,136,.95) 0 9px, #dfe3e8 9px 18px); }
+  .sim-wire { height: 7px; margin-top: -3.5px;
+    background: repeating-linear-gradient(45deg,
+      rgba(147,51,234,.95) 0 6px, #dfe3e8 6px 12px); }
+  .sim-rod.grabbed { box-shadow: 0 0 10px 2px rgba(74,222,128,.45); }
+  .sim-tip { position: absolute; left: -10px; top: 50%; margin-top: -6px;
+             border: 6px solid transparent; border-right: 10px solid #f97316; }
+  .sim-wire .sim-tip { margin-top: -4px; border-width: 4px; border-right-width: 8px; }
+
+  .sim-readouts { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+  .sim-tool { display: flex; align-items: center; gap: 12px; font-size: 13.5px; }
+  .sim-tool-name { font-weight: 600; width: 130px; }
+  .sim-val { color: #9aa0a8; font-family: Consolas, monospace; }
+  .sim-val b { color: #e8e8ea; font-weight: 600; }
+  .dial { position: relative; width: 26px; height: 26px; border-radius: 50%;
+          border: 2px solid #3a3f49; flex-shrink: 0; }
+  .dial-line { position: absolute; left: 50%; top: 50%; width: 2px; height: 11px;
+               margin-left: -1px; background: #f97316; transform-origin: 1px 0;
+               border-radius: 1px; }
 </style>
 </head>
 <body>
@@ -93,11 +140,56 @@
 
   <div id="xray-banner" class="xray-off">X-RAY: OFF</div>
 
+  <div id="pedals">
+    <span class="pedal-lbl">Foot pedals:</span>
+    <span class="badge" id="badge-left-foot">L (X-ray): Scanning…</span>
+    <span class="badge" id="badge-right-foot">R (capture): Scanning…</span>
+    <span class="badge" id="capture-badge">captures: 0</span>
+  </div>
+  <div id="capture-flash"></div>
+
   <div class="hands">
     <div class="hand-card" id="card-left"></div>
     <div class="hand-card" id="card-right"></div>
   </div>
   <button id="recenter-all">Re-center both</button>
+
+  <div class="sim-card">
+    <div class="sim-header">
+      <span class="sim-title">Catheter / Guidewire simulation</span>
+      <button id="sim-reset">Reset tools</button>
+    </div>
+    <div class="sim-hint">
+      Same manipulation model as the visionOS app: SoftPot touch = <b>grab</b> ·
+      strip slide + tracker roll = <b>twist</b> · <b>insert/retract</b> = ←/→ keys or mouse
+      wheel over the scene while grabbed (PC stand-in for Vision Pro hand tracking).
+      X-ray button makes the catheter translucent.
+    </div>
+    <div class="sim-scene" id="sim-scene">
+      <div class="sim-vessel" id="sim-vessel"></div>
+      <div class="sim-hub" id="sim-hub"></div>
+      <div class="sim-rod sim-catheter" id="rod-left"><div class="sim-tip"></div></div>
+      <div class="sim-rod sim-wire" id="rod-right"><div class="sim-tip"></div></div>
+    </div>
+    <div class="sim-readouts">
+      <div class="sim-tool">
+        <span class="dot" style="background:#0d9488"></span>
+        <span class="sim-tool-name">Catheter (left)</span>
+        <span class="badge" id="sim-grab-left">free</span>
+        <span class="sim-val">insert <b id="sim-ins-left">0.0</b> / 58 cm</span>
+        <span class="sim-val">twist <b id="sim-twist-left">+0.00</b> turns</span>
+        <span class="dial"><span class="dial-line" id="dial-left"></span></span>
+      </div>
+      <div class="sim-tool">
+        <span class="dot" style="background:#9333ea"></span>
+        <span class="sim-tool-name">Guidewire (right)</span>
+        <span class="badge" id="sim-grab-right">free</span>
+        <span class="sim-val">insert <b id="sim-ins-right">0.0</b> / 61 cm</span>
+        <span class="sim-val">twist <b id="sim-twist-right">+0.00</b> turns</span>
+        <span class="dial"><span class="dial-line" id="dial-right"></span></span>
+      </div>
+    </div>
+  </div>
 
 <script>
 "use strict";
@@ -145,11 +237,116 @@ function quatToMatrix3d(q) {
                   `${c(0,2)},${c(1,2)},${c(2,2)},0,0,0,0,1)`;
 }
 
+// ---------- catheter/wire simulation — ported 1:1 from ESP32Tracker/SimulationModel.swift ----------
+// grab = SoftPot touched · twist = strip slide + tracker roll (swing–twist about the
+// board's long axis, in the same app frame the Swift model uses: w,−x,y,−z) ·
+// insert = arrow keys / mouse wheel here (the headset uses ARKit hand tracking).
+const SIM = {
+  maxInsertion:   { left: 0.58, right: 0.61 },   // meters — VascCath limits
+  insertionScale: { left: 0.635, right: 0.63 },
+  stripFullTurns: 1.0,            // sliding the full 255-unit strip = this many turns
+  twistAxis: [1, 0, 0],
+  catheterLength: 0.60, wireLength: 0.65,        // display lengths (SimulationView.swift)
+  vesselLength: 0.70,
+};
+const tools = {
+  left:  { grabbed: false, insertion: 0, twist: 0 },   // catheter
+  right: { grabbed: false, insertion: 0, twist: 0 },   // guidewire
+};
+const simLastTouch = {};   // hand → previous touchCurrent
+const simLastQuat  = {};   // hand → previous app-frame quaternion
+
+// Signed rotation of q about axis — the "twist" half of swing–twist.
+function twistAngle(q, axis) {
+  const proj = q.x*axis[0] + q.y*axis[1] + q.z*axis[2];
+  if (Math.abs(proj) < 1e-9 && Math.abs(q.w) < 1e-9) return 0;
+  return 2 * Math.atan2(proj, q.w);
+}
+
+// One BLE sample: update grab; while grabbed, accumulate twist from the strip slide
+// and the tracker's frame-to-frame roll. Incremental → re-grabbing never jumps.
+function simIngest(hand, s) {
+  const t = tools[hand];
+  t.grabbed = s.touchCurrent > 0;
+  const q = { w: s.w, x: -s.x, y: s.y, z: -s.z };   // app frame, as TrackerState.swift
+
+  if (t.grabbed) {
+    const lastT = simLastTouch[hand];
+    if (lastT > 0 && s.touchCurrent > 0)
+      t.twist += (s.touchCurrent - lastT) / 255 * 2 * Math.PI * SIM.stripFullTurns;
+
+    const lastQ = simLastQuat[hand];
+    if (lastQ) {
+      let d = qMul(qConj(lastQ), q);
+      if (d.w < 0) d = { w: -d.w, x: -d.x, y: -d.y, z: -d.z };   // keep the short arc
+      t.twist += twistAngle(d, SIM.twistAxis);
+    }
+  }
+  simLastTouch[hand] = s.touchCurrent;
+  simLastQuat[hand] = q;
+}
+
+// PC stand-in for SimulationModel.handMoved: negative deltaX = insertion.
+function handMoved(hand, deltaX) {
+  const t = tools[hand];
+  if (!t.grabbed) return;
+  t.insertion = Math.min(SIM.maxInsertion[hand],
+                Math.max(0, t.insertion + -deltaX * SIM.insertionScale[hand]));
+}
+const pcInsert = deltaX => { handMoved("left", deltaX); handMoved("right", deltaX); };
+
+window.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight")     { pcInsert(-0.015); e.preventDefault(); }
+  else if (e.key === "ArrowLeft") { pcInsert(+0.015); e.preventDefault(); }
+});
+document.getElementById("sim-scene").addEventListener("wheel", e => {
+  pcInsert(-e.deltaY * 0.0002);   // wheel down = insert
+  e.preventDefault();
+}, { passive: false });
+
+document.getElementById("sim-reset").onclick = () => {
+  for (const t of Object.values(tools)) { t.insertion = 0; t.twist = 0; }
+};
+
+function renderSim() {
+  const scene = document.getElementById("sim-scene");
+  const W = scene.clientWidth;
+  // Scene spans vessel (left of entry) + longest fully-retracted rod (right of entry).
+  const span = SIM.vesselLength + SIM.wireLength + 0.04;
+  const pxPerM = W / span;
+  const entryX = (SIM.vesselLength + 0.02) * pxPerM;
+
+  const vessel = document.getElementById("sim-vessel");
+  vessel.style.left  = (entryX - SIM.vesselLength * pxPerM) + "px";
+  vessel.style.width = (SIM.vesselLength * pxPerM) + "px";
+  document.getElementById("sim-hub").style.left = (entryX - 5) + "px";
+
+  for (const hand of HANDS) {
+    const t = tools[hand];
+    const len = hand === "left" ? SIM.catheterLength : SIM.wireLength;
+    const rod = document.getElementById(`rod-${hand}`);
+    rod.style.left  = (entryX - t.insertion * pxPerM) + "px";
+    rod.style.width = (len * pxPerM) + "px";
+    // Twist reads as a barber-pole: one full turn slides the stripes one period.
+    rod.style.backgroundPosition = `${(t.twist / (2 * Math.PI)) * 25.4}px 0`;
+    rod.classList.toggle("grabbed", t.grabbed);
+    if (hand === "left") rod.style.opacity = latest.xray ? 0.35 : 1;   // X-ray see-through
+
+    const grab = document.getElementById(`sim-grab-${hand}`);
+    grab.textContent = t.grabbed ? "GRABBED" : "free";
+    grab.classList.toggle("connected", t.grabbed);
+    document.getElementById(`sim-ins-${hand}`).textContent = (t.insertion * 100).toFixed(1);
+    document.getElementById(`sim-twist-${hand}`).textContent = fmt(t.twist / (2 * Math.PI), 2);
+    document.getElementById(`dial-${hand}`).style.transform = `rotate(${t.twist}rad)`;
+  }
+}
+
 // ---------- per-hand UI ----------
 const HANDS = ["left", "right"];
 const CALIB_COLORS = ["#ef4444", "#f97316", "#a3e635", "#4ade80"];
-const latest = {};      // hand → last sample from the server
+const latest = {};      // device → last sample from the server (+ xray/captureCount)
 const reference = { left: Q_IDENTITY, right: Q_IDENTITY };   // re-center references
+let seenCaptures = null;   // last captureCount rendered (null until the first message)
 
 function buildCard(hand) {
   const title = hand === "left" ? "Left Hand" : "Right Hand";
@@ -241,12 +438,30 @@ function render() {
     }
   }
 
-  // Single shared X-ray state — toggled by either hand's GPIO6/7 button.
+  // Single shared X-ray state — toggled by either hand's button or the LEFT foot pedal.
   const xrayBanner = document.getElementById("xray-banner");
   const xray = !!latest.xray;
   xrayBanner.textContent = "X-RAY: " + (xray ? "ON" : "OFF");
   xrayBanner.className = xray ? "xray-on" : "xray-off";
 
+  // Foot pedals: connection badges + the RIGHT pedal's capture counter with a flash.
+  for (const foot of ["left-foot", "right-foot"]) {
+    const badge = document.getElementById(`badge-${foot}`);
+    const connected = !!latest[foot]?.connected;
+    badge.textContent = (foot === "left-foot" ? "L (X-ray): " : "R (capture): ")
+                      + (connected ? "Connected" : "Scanning…");
+    badge.classList.toggle("connected", connected);
+  }
+  const captures = latest.captureCount ?? 0;
+  document.getElementById("capture-badge").textContent = `captures: ${captures}`;
+  if (seenCaptures !== null && captures > seenCaptures) {
+    const flash = document.getElementById("capture-flash");
+    flash.classList.remove("fire"); void flash.offsetWidth;   // restart the animation
+    flash.classList.add("fire");
+  }
+  if (latest.captureCount !== undefined) seenCaptures = captures;
+
+  renderSim();
   requestAnimationFrame(render);
 }
 requestAnimationFrame(render);
@@ -256,7 +471,16 @@ const status = document.getElementById("server-status");
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/ws`);
   ws.onopen = () => { status.textContent = "Dashboard server connected — scanning for trackers over Bluetooth."; };
-  ws.onmessage = e => { Object.assign(latest, JSON.parse(e.data)); };
+  ws.onmessage = e => {
+    const data = JSON.parse(e.data);
+    Object.assign(latest, data);
+    // Feed each hand's sample to the simulation (drop the baseline while disconnected
+    // so a reconnect doesn't register a giant twist delta).
+    for (const hand of HANDS) {
+      if (data[hand]?.connected) simIngest(hand, data[hand]);
+      else { delete simLastQuat[hand]; delete simLastTouch[hand]; }
+    }
+  };
   ws.onclose = () => {
     status.textContent = "Dashboard server lost — retrying…";
     setTimeout(connect, 1000);

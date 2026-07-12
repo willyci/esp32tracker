@@ -54,6 +54,7 @@ by their advertised name (`Left Hand Tracker` / `Right Hand Tracker`).
 | [`project.yml`](project.yml) | XcodeGen config — generates the visionOS Xcode project |
 | [`ESP32Tracker/`](ESP32Tracker/) | The visionOS app (SwiftUI + RealityKit + Core Bluetooth) |
 | [`firmware/`](firmware/) | The ESP32-C3 Arduino sketch + PlatformIO config |
+| [`pc_dashboard/`](pc_dashboard/) | Browser dashboard to test both trackers + the simulation model without the headset |
 
 ## Hardware
 

@@ -1,8 +1,10 @@
-# PC BLE dashboard for the two hand trackers.
+# PC BLE dashboard for the two hand trackers + two foot pedals.
 #
-# Connects to BOTH ESP32-C3 boards ("Left Hand Tracker" / "Right Hand Tracker") over
-# Bluetooth LE, parses the same 32-byte packets the visionOS app consumes, and pushes
-# them over a WebSocket to a local web page (index.html) that renders two live 3D cubes.
+# Connects to the ESP32-C3 hand trackers ("Left/Right Hand Tracker") and the ESP32-S3
+# foot pedals ("Left/Right Foot Pedal") over Bluetooth LE, parses the same 32-byte
+# packets the visionOS app consumes, and pushes them over a WebSocket to a local web
+# page (index.html) that renders two live 3D cubes, the simulation panel, and pedal
+# status. Left pedal toggles the shared X-ray; right pedal fires a screen capture.
 #
 #   pip install bleak aiohttp
 #   python tracker_dashboard.py        → opens http://localhost:8765
@@ -24,43 +26,55 @@ from bleak import BleakClient, BleakScanner
 SERVICE_UUID = "4f7a0001-9b3e-4c2a-8d1f-0a1b2c3d4e5f"
 CHAR_UUID    = "4f7a0002-9b3e-4c2a-8d1f-0a1b2c3d4e5f"
 
-# Advertised names set by IS_LEFT_HAND in the firmware. The name arrives in the BLE
-# scan response (it doesn't fit the main advertising packet next to the 128-bit UUID).
+# Advertised names set by IS_LEFT_HAND / IS_LEFT_FOOT in the firmware. The name arrives in
+# the BLE scan response (it doesn't fit the main advertising packet next to the 128-bit UUID).
+# All four devices speak the same 32-byte packet; the pedals only ever change byte 31.
 HAND_NAMES = {
     "left":  "Left Hand Tracker",
     "right": "Right Hand Tracker",
 }
+PEDAL_NAMES = {
+    "left-foot":  "Left Foot Pedal",    # byte-31 flip = toggle the shared X-ray
+    "right-foot": "Right Foot Pedal",   # byte-31 flip = one X-ray screen capture
+}
+DEVICE_NAMES = {**HAND_NAMES, **PEDAL_NAMES}
 
 PORT = 8765
 PACKET = struct.Struct("<7f4B")           # w x y z ax ay az, calib, touchStart, touchCurrent, xrayOn = 32 bytes
 BROADCAST_INTERVAL = 1 / 30               # UI doesn't need the firmware's full 50 Hz
 
-# Latest known state per hand, broadcast as-is to the browser.
+# Latest known state per device, broadcast as-is to the browser. (Pedals reuse the same
+# shape — their quat/accel/touch fields simply never change.)
 state = {
-    hand: {"connected": False, "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0,
-           "ax": 0.0, "ay": 0.0, "az": 0.0, "calib": 0,
-           "touchStart": 0, "touchCurrent": 0, "touchActive": 0}
-    for hand in HAND_NAMES
+    dev: {"connected": False, "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0,
+          "ax": 0.0, "ay": 0.0, "az": 0.0, "calib": 0,
+          "touchStart": 0, "touchCurrent": 0, "touchActive": 0}
+    for dev in DEVICE_NAMES
 }
-master_xray = False                       # single shared X-ray state (either hand's button toggles it)
-last_xray_bit = {hand: 0 for hand in HAND_NAMES}   # per-hand toggle bit, for edge detection
-busy: set[str] = set()                    # hands currently connecting/connected
+master_xray = False                       # single shared X-ray state (hands + left pedal toggle it)
+capture_count = 0                         # total X-ray captures fired by the right pedal
+last_xray_bit = {dev: 0 for dev in DEVICE_NAMES}   # per-device toggle bit, for edge detection
+busy: set[str] = set()                    # devices currently connecting/connected
 websockets: set[web.WebSocketResponse] = set()
 
 
-def on_packet(hand: str, data: bytearray) -> None:
-    global master_xray
+def on_packet(dev: str, data: bytearray) -> None:
+    global master_xray, capture_count
     if len(data) < PACKET.size:
         return
     w, x, y, z, ax, ay, az, calib, tStart, tCur, xrayBit = PACKET.unpack(bytes(data[:PACKET.size]))
-    # The board flips xrayBit on each button click; toggle the single shared X-ray on ANY change,
-    # so a button on EITHER hand flips it. "Touched" is derived from touchCurrent > 0.
-    if xrayBit != last_xray_bit[hand]:
-        last_xray_bit[hand] = xrayBit
-        master_xray = not master_xray
-        print(f"[xray] {hand} button -> X-RAY {'ON' if master_xray else 'OFF'}")
-    state[hand].update(w=w, x=x, y=y, z=z, ax=ax, ay=ay, az=az, calib=calib,
-                       touchStart=tStart, touchCurrent=tCur, touchActive=1 if tCur > 0 else 0)
+    # Every board flips xrayBit on each button/pedal press; the MEANING depends on who sent it:
+    # the right foot pedal fires one screen capture, everything else toggles the shared X-ray.
+    if xrayBit != last_xray_bit[dev]:
+        last_xray_bit[dev] = xrayBit
+        if dev == "right-foot":
+            capture_count += 1
+            print(f"[capture] right pedal -> X-RAY CAPTURE #{capture_count}")
+        else:
+            master_xray = not master_xray
+            print(f"[xray] {dev} button -> X-RAY {'ON' if master_xray else 'OFF'}")
+    state[dev].update(w=w, x=x, y=y, z=z, ax=ax, ay=ay, az=az, calib=calib,
+                      touchStart=tStart, touchCurrent=tCur, touchActive=1 if tCur > 0 else 0)
 
 
 async def serve_device(hand: str, device) -> None:
@@ -87,28 +101,35 @@ async def scan_loop() -> None:
     address string) — it's the reliable path with bleak's WinRT backend.
     """
     while True:
-        missing = [h for h in HAND_NAMES if h not in busy]
+        missing = [d for d in DEVICE_NAMES if d not in busy]
         if missing:
-            print(f"Scanning for: {', '.join(HAND_NAMES[h] for h in missing)}")
+            print(f"Scanning for: {', '.join(DEVICE_NAMES[d] for d in missing)}")
             try:
                 found = await BleakScanner.discover(timeout=4.0, return_adv=True)
             except Exception as e:
                 print(f"Scan failed ({e}) — is Bluetooth on? Retrying…")
                 await asyncio.sleep(3)
                 continue
+            # Debug aid: list every named device in range, so "is the board advertising
+            # at all?" is answerable straight from this console.
+            named = sorted({adv.local_name or device.name
+                            for device, adv in found.values()
+                            if adv.local_name or device.name})
+            if named:
+                print(f"  BLE names in range: {', '.join(named)}")
             for device, adv in found.values():
                 name = adv.local_name or device.name or ""
-                for hand, expected in HAND_NAMES.items():
-                    if expected in name and hand not in busy:
-                        busy.add(hand)
-                        asyncio.create_task(serve_device(hand, device))
+                for dev, expected in DEVICE_NAMES.items():
+                    if expected in name and dev not in busy:
+                        busy.add(dev)
+                        asyncio.create_task(serve_device(dev, device))
         await asyncio.sleep(2)
 
 
 async def broadcast_loop() -> None:
     while True:
         if websockets:
-            payload = json.dumps({**state, "xray": master_xray})
+            payload = json.dumps({**state, "xray": master_xray, "captureCount": capture_count})
             await asyncio.gather(
                 *(ws.send_str(payload) for ws in list(websockets)),
                 return_exceptions=True,   # a closing socket shouldn't kill the loop

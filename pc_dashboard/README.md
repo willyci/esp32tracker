@@ -1,9 +1,11 @@
 # PC dashboard — live view of both hand trackers
 
 A small Windows/Mac/Linux tool to verify the BLE pipeline without the Vision Pro: it connects
-to **both** boards over Bluetooth LE and shows two live 3D dice cubes (teal = left, purple =
-right) plus the numeric data, in your browser. Speaks the exact same GATT protocol as the
-visionOS app (same UUIDs, same 32-byte packet, same name-based left/right matching).
+to **both hand trackers and both foot pedals** over Bluetooth LE and shows two live 3D dice
+cubes (teal = left, purple = right), the numeric data, pedal status, and a
+**catheter/guidewire simulation panel** (same manipulation model as the visionOS app), in
+your browser. Speaks the exact same GATT protocol as the visionOS app (same UUIDs, same
+32-byte packet, same name-based device matching).
 
 ## Run
 
@@ -78,6 +80,36 @@ visionOS app.
 Unplug one board → its badge returns to *Scanning…* within a few seconds, the other keeps
 streaming. Plug it back in → it reconnects automatically (~5–10 s). Ctrl+C the server and
 restart it → the page reconnects on its own.
+
+### 8. Catheter/guidewire simulation (glove interaction, no headset)
+The bottom panel is a 1:1 port of the visionOS app's `SimulationModel.swift` — use it to
+tune and verify the glove interaction before a headset session:
+
+- **Grab**: touch a SoftPot → that tool's badge flips to **GRABBED** and its rod glows.
+  Left tracker drives the teal **catheter**, right drives the purple **guidewire**.
+- **Twist**: while grabbed, slide along the strip (full strip = 1 turn) or physically
+  roll the tracker — both accumulate, shown as stripe movement on the rod, the roll dial,
+  and a turns counter. Releasing freezes the twist; re-grabbing never jumps.
+- **Insert**: the headset uses ARKit hand tracking for this, which a PC doesn't have, so
+  ←/→ arrow keys or the mouse wheel over the scene stand in — they advance/retract any
+  grabbed tool with the same VascCath scale factors and depth limits (58 cm / 61 cm).
+- **X-ray**: either board's button renders the catheter translucent so the wire inside shows.
+
+If twist runs the wrong way or is too sensitive, tune `SIM.twistAxis` / `SIM.stripFullTurns`
+in `index.html` — then apply the same values to `SimulationModel.swift` (they must match).
+
+### 9. Foot pedals
+Power on the ESP32-S3 SuperMini pedals (`../firmware/left-foot/`, `../firmware/right-foot/`) —
+their badges under the X-ray banner flip to green **Connected** just like the hand cards.
+
+- **Left pedal** (X-ray): each stomp toggles the shared X-RAY banner — same effect as the
+  hand trackers' GPIO6/7 button, and it also drives the catheter transparency in the
+  simulation panel.
+- **Right pedal** (capture): each stomp increments the **captures** counter and fires a
+  brief white full-screen flash (fluoro-shot style). The dashboard only counts and flashes —
+  what a "capture" saves is up to each consumer (the visionOS app will define its own action).
+
+All four devices are independent BLE connections; any subset may be on at a time.
 
 ### 8. Latency feel
 Twist a sensor sharply — the cube should respond with no perceptible lag (the link runs at
