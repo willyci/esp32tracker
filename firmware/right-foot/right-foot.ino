@@ -16,8 +16,9 @@
 //
 // Libraries: NimBLE-Arduino 1.4.x (not 2.x).
 // Board: "ESP32S3 Dev Module" (that's the right choice for the S3 SuperMini), core 2.0.17,
-// USB CDC On Boot: Enabled, 115200 baud. The SuperMini's onboard WS2812 sits on GPIO48 —
-// the same pin this board definition maps RGB_BUILTIN to, so the status LED just works.
+// USB CDC On Boot: Enabled, 115200 baud. Status LED is DISABLED by default (USE_STATUS_LED
+// below) — clone boards disagree on whether GPIO48 has a WS2812 or a plain blue LED, and
+// a plain LED flickers nonstop if it's fed WS2812 data.
 
 #include <NimBLEDevice.h>
 
@@ -66,15 +67,25 @@ static bool     pedalPressed = false;   // debounced (confirmed) state
 static int      pedalRaw     = HIGH;    // last raw pin reading
 static uint32_t pedalRawMs   = 0;       // when the raw reading last changed
 
-// Onboard LED (if the board has one): ON while a central is connected, brief blink on press.
+// Optional status LED: ON while a central is connected, brief blink on press.
+// DEFAULT OFF — many S3 SuperMini clones have a plain blue LED (not a WS2812) on
+// GPIO48, and feeding it WS2812 data makes it flicker constantly. Set to 1 only if
+// your board has a real addressable RGB LED.
+#define USE_STATUS_LED 0
+
 static uint32_t ledBlinkUntil = 0;
+static bool     ledLastState  = false;
 static void setLed(bool on) {
-#if defined(RGB_BUILTIN)
-  neopixelWrite(RGB_BUILTIN, 0, on ? 16 : 0, 0);   // dim green
-#elif defined(LED_BUILTIN)
-  digitalWrite(LED_BUILTIN, on ? HIGH : LOW);
+#if USE_STATUS_LED
+  if (on == ledLastState) return;   // only touch the pin on a state CHANGE
+  ledLastState = on;
+  #if defined(RGB_BUILTIN)
+    neopixelWrite(RGB_BUILTIN, 0, on ? 16 : 0, 0);   // dim green
+  #elif defined(LED_BUILTIN)
+    digitalWrite(LED_BUILTIN, on ? HIGH : LOW);
+  #endif
 #else
-  (void)on;
+  (void)on; (void)ledLastState;
 #endif
 }
 
@@ -141,7 +152,7 @@ void setup() {
   digitalWrite(PIN_BTN_GND, LOW);
   pinMode(PIN_BTN, INPUT_PULLUP);
 
-#if !defined(RGB_BUILTIN) && defined(LED_BUILTIN)
+#if USE_STATUS_LED && !defined(RGB_BUILTIN) && defined(LED_BUILTIN)
   pinMode(LED_BUILTIN, OUTPUT);
 #endif
 
