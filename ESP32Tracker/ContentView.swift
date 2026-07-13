@@ -26,6 +26,15 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(ble.xrayOn ? .green : .gray)
 
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(ble.footPedalConnected ? .green : .gray)
+                        .frame(width: 8, height: 8)
+                    Text(ble.footPedalConnected ? "Foot pedal connected" : "Foot pedal not found")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 // Catheter/wire simulation: grab = SoftPot touch, twist = slide + roll,
                 // insertion = hand movement (needs the immersive space for hand tracking).
                 Button {

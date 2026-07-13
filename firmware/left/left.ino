@@ -46,6 +46,7 @@ static constexpr int PIN_XRAY_GND = 7;   // driven LOW so the button can bridge 
 // ---- BLE identifiers — must match the app exactly ----
 #define SERVICE_UUID      "4F7A0001-9B3E-4C2A-8D1F-0A1B2C3D4E5F"
 #define ORIENTATION_UUID  "4F7A0002-9B3E-4C2A-8D1F-0A1B2C3D4E5F"
+#define XRAY_STATE_UUID   "4F7A0003-9B3E-4C2A-8D1F-0A1B2C3D4E5F"  // app WRITES shared X-ray here
 
 // ---- Which hand is this board? ----  1 = left, 0 = right
 #define IS_LEFT_HAND 1
@@ -86,8 +87,8 @@ static OrientationPacket pkt = { 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 };
 
 static constexpr uint32_t REPORT_INTERVAL_US  = 20000;
 static constexpr uint32_t NOTIFY_INTERVAL_MS  = 20;
-static constexpr uint32_t DISPLAY_INTERVAL_MS = 1000;  // OLED redraw 1 Hz — glanceable status;
-                                                       // real-time data is on the dashboard/BLE.
+static constexpr uint32_t DISPLAY_INTERVAL_MS = 500;   // OLED refresh 2 Hz — cheap now: labels
+                                                       // draw once, only changed rows rewrite.
 static constexpr uint32_t STATUS_LOG_INTERVAL_MS = 1000;
 static uint32_t lastNotifyMs  = 0;
 static uint32_t lastDisplayMs = 0;
@@ -95,6 +96,7 @@ static uint32_t lastLogMs     = 0;
 static uint32_t lastDrawUs    = 0;   // how long the last OLED redraw took (microseconds)
 
 // Screen shows for SCREEN_ON_MS after power-up or a BOOT press, then auto-offs.
+// (0 = stay on forever — updates are cheap single-row writes either way.)
 static constexpr uint32_t SCREEN_ON_MS = 10000;   // milliseconds (10 s)
 static bool     screenEnabled = true;
 static uint32_t screenOnMs    = 0;     // millis() when the screen was last turned on
@@ -107,6 +109,10 @@ static bool     xrayPressed  = false;   // debounced (confirmed) button state
 static int      xrayRaw      = HIGH;    // last raw pin reading
 static uint32_t xrayRawMs    = 0;       // when the raw reading last changed
 
+// The TRUE shared X-ray state, written back by the app (the app owns it; our button only
+// sends flip events). The OLED shows THIS, so all three boards always agree.
+static volatile bool xraySynced = false;
+
 // ---------------------------------------------------------------------------
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* /*server*/) override {
@@ -117,6 +123,18 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     deviceConnected = false;
     Serial.println(">> central DISCONNECTED — re-advertising");
     NimBLEDevice::startAdvertising();
+  }
+};
+
+// The app writes the shared X-ray state (1 byte, 0/1) whenever it changes — on any
+// board's button, the foot pedal, or the app's own UI — and once at connect.
+class XrayStateCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* ch) override {
+    NimBLEAttValue v = ch->getValue();
+    if (v.size() >= 1) {
+      xraySynced = (v[0] != 0);
+      Serial.printf(">> X-RAY state from app -> %s\n", xraySynced ? "ON" : "OFF");
+    }
   }
 };
 
@@ -156,6 +174,10 @@ void setupBLE() {
 
   NimBLEService* service = server->createService(SERVICE_UUID);
   orientationChar = service->createCharacteristic(ORIENTATION_UUID, NIMBLE_PROPERTY::NOTIFY);
+  NimBLECharacteristic* xrayStateChar =
+      service->createCharacteristic(XRAY_STATE_UUID,
+                                    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::READ);
+  xrayStateChar->setCallbacks(new XrayStateCallbacks());
   service->start();
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
@@ -168,31 +190,61 @@ void setupBLE() {
   Serial.println("[BLE] advertising as " DEVICE_NAME);
 }
 
+// Data layout: label rows draw ONCE, then each refresh rewrites only the value rows
+// that changed. One 16-char row costs a few ms on software I2C vs ~10x that for the
+// old full-screen redraw, so the 50 Hz BLE loop never hiccups even with the screen on.
+//   row 0: <HAND> <CONN/ADV> C:n    (rewritten only when it changes)
+//   row 2: w   x   y   z            (labels, static)
+//   row 3: +.12-.45+.99-.01         (quaternion — the ONE row drawn every tick)
+//   row 5: XRAY  St   Cu            (labels, static)
+//   row 6: ON    123  200           (rewritten only when it changes)
+static bool labelsDrawn = false;
+static char prevRow0[17] = "";
+static char prevRow6[17] = "";
+
+// Format v (-1..1) as exactly 4 chars: "+.12", "-.98", "+1.0" — four fit in one row.
+static void fmt4(float v, char* out) {
+  char sign = (v < 0) ? '-' : '+';
+  float a = fabsf(v);
+  if (a >= 0.995f) snprintf(out, 5, "%c1.0", sign);
+  else             snprintf(out, 5, "%c.%02d", sign, (int)roundf(a * 100.0f));
+}
+
 void displayMessage(const char* l1, const char* l2) {
   if (!oledOK) return;
   display.clear();
   display.drawString(0, 0, HAND_LABEL);
   display.drawString(0, 2, l1);
   display.drawString(0, 4, l2);
+  labelsDrawn = false;   // full-screen message wiped the data layout
 }
 
 void displayData() {
   if (!oledOK) return;
-  char buf[20];
-  // Overwrite each line in place (padded with trailing spaces so old digits are erased).
-  snprintf(buf, sizeof(buf), "%-5s %-4s C:%u", HAND_LABEL, deviceConnected ? "CONN" : "ADV", pkt.calib);
-  display.drawString(0, 0, buf);
-  snprintf(buf, sizeof(buf), "w %+.3f ", pkt.w);  display.drawString(0, 2, buf);
-  snprintf(buf, sizeof(buf), "x %+.3f ", pkt.x);  display.drawString(0, 3, buf);
-  snprintf(buf, sizeof(buf), "y %+.3f ", pkt.y);  display.drawString(0, 4, buf);
-  snprintf(buf, sizeof(buf), "z %+.3f ", pkt.z);  display.drawString(0, 5, buf);
-  snprintf(buf, sizeof(buf), "X-RAY: %s   ", pkt.xrayOn ? "ON " : "OFF");
-  display.drawString(0, 6, buf);
+  if (!labelsDrawn) {                        // first draw after a clear: labels once
+    display.clear();
+    display.drawString(0, 2, "w   x   y   z");
+    display.drawString(0, 5, "XRAY  St   Cu");
+    prevRow0[0] = prevRow6[0] = '\0';
+    labelsDrawn = true;
+  }
+  char row[17];
+
+  snprintf(row, sizeof(row), "%-5s %-4s C:%u",
+           HAND_LABEL, deviceConnected ? "CONN" : "ADV", pkt.calib);
+  if (strcmp(row, prevRow0) != 0) { display.drawString(0, 0, row); strcpy(prevRow0, row); }
+
+  char qw[5], qx[5], qy[5], qz[5];           // quaternion — changes every tick
+  fmt4(pkt.w, qw); fmt4(pkt.x, qx); fmt4(pkt.y, qy); fmt4(pkt.z, qz);
+  snprintf(row, sizeof(row), "%s%s%s%s", qw, qx, qy, qz);
+  display.drawString(0, 3, row);
+
   if (pkt.touchCurrent > 0)
-    snprintf(buf, sizeof(buf), "St%3u Cu%3u", pkt.touchStart, pkt.touchCurrent);
+    snprintf(row, sizeof(row), "%-4s  %3u  %3u",
+             xraySynced ? "ON" : "OFF", pkt.touchStart, pkt.touchCurrent);
   else
-    snprintf(buf, sizeof(buf), "touch: --   ");
-  display.drawString(0, 7, buf);
+    snprintf(row, sizeof(row), "%-4s   --   --", xraySynced ? "ON" : "OFF");
+  if (strcmp(row, prevRow6) != 0) { display.drawString(0, 6, row); strcpy(prevRow6, row); }
 }
 
 // SoftPot: capture the START position on touch-down, track the CURRENT position while
@@ -217,19 +269,24 @@ void readSoftPot() {
   pkt.touchCurrent = (uint8_t)softpotEMA;
 }
 
-// BOOT button (GPIO9, active LOW): a press WAKES the OLED for SCREEN_ON_MS, then it auto-offs.
-// Most of the time the screen is OFF, so the loop runs like the no-screen firmware (cool + smooth).
+// BOOT button (GPIO9, active LOW): each press TOGGLES the OLED on/off. Updates are
+// single-row now, so the screen can stay on; turn it off to save battery if you like.
 void handleScreenButton(uint32_t now) {
   int btn = digitalRead(PIN_BOOT);
   if (btn != lastBtnState && (now - lastBtnMs) > 50) {   // simple debounce
     lastBtnMs = now;
     lastBtnState = btn;
-    if (btn == LOW) {                                    // pressed → wake the screen
-      screenEnabled = true;
-      screenOnMs = now;                                  // (re)start the on-timer
-      Serial.println(">> SCREEN ON");
-      displayData();
-      lastDisplayMs = now;
+    if (btn == LOW) {                                    // pressed → toggle the screen
+      screenEnabled = !screenEnabled;
+      Serial.println(screenEnabled ? ">> SCREEN ON" : ">> SCREEN OFF");
+      if (screenEnabled) {
+        screenOnMs = now;                                // (re)start the auto-off timer (if used)
+        displayData();
+        lastDisplayMs = now;
+      } else {
+        display.clear();
+        labelsDrawn = false;
+      }
     }
   }
 }
@@ -340,10 +397,11 @@ void loop() {
   handleScreenButton(now);   // BOOT press wakes the OLED
   handleXrayButton(now);     // GPIO6/7 button toggles X-ray
 
-  // Auto-off the screen SCREEN_ON_MS after it was last turned on.
-  if (screenEnabled && (now - screenOnMs >= SCREEN_ON_MS)) {
+  // Auto-off the screen SCREEN_ON_MS after it was last turned on (0 = never).
+  if (SCREEN_ON_MS > 0 && screenEnabled && (now - screenOnMs >= SCREEN_ON_MS)) {
     screenEnabled = false;
     display.clear();
+    labelsDrawn = false;
     Serial.println(">> SCREEN OFF (auto)");
   }
 
@@ -367,9 +425,10 @@ void loop() {
   // Heartbeat log once a second — only when the screen is on (keeps "screen off" minimal).
   if (screenEnabled && now - lastLogMs >= STATUS_LOG_INTERVAL_MS) {
     lastLogMs = now;
-    Serial.printf("[status] %s oled=%s xray=%u touch(s=%u c=%u) q=%.2f,%.2f,%.2f,%.2f calib=%u\n",
+    Serial.printf("[status] %s oled=%s draw=%luus xbit=%u xsync=%u touch(s=%u c=%u) q=%.2f,%.2f,%.2f,%.2f calib=%u\n",
                   deviceConnected ? "CONN" : "ADV", oledOK ? "ok" : "--",
-                  pkt.xrayOn, pkt.touchStart, pkt.touchCurrent,
+                  (unsigned long)lastDrawUs, pkt.xrayOn, (unsigned)xraySynced,
+                  pkt.touchStart, pkt.touchCurrent,
                   pkt.w, pkt.x, pkt.y, pkt.z, pkt.calib);
   }
 
