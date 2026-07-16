@@ -26,18 +26,20 @@ from bleak import BleakClient, BleakScanner
 SERVICE_UUID = "4f7a0001-9b3e-4c2a-8d1f-0a1b2c3d4e5f"
 CHAR_UUID    = "4f7a0002-9b3e-4c2a-8d1f-0a1b2c3d4e5f"
 
-# Advertised names set by IS_LEFT_HAND / IS_LEFT_FOOT in the firmware. The name arrives in
-# the BLE scan response (it doesn't fit the main advertising packet next to the 128-bit UUID).
-# All four devices speak the same 32-byte packet; the pedals only ever change byte 31.
-HAND_NAMES = {
-    "left":  "Left Hand Tracker",
-    "right": "Right Hand Tracker",
+# Advertised names → dashboard slot. Names are set by IS_LEFT_HAND / IS_LEFT_FOOT in the
+# firmware and arrive in the BLE scan response (they don't fit the main advertising packet
+# next to the 128-bit UUID). All boards speak the same 32-byte packet.
+#
+# "Mini Tracker" = the ESP32-C3 0.42"-OLED glove unit (SoftPot + 2 buttons, NO IMU). It is
+# a drop-in alternative for a hand slot: quaternion stays identity, and its second button
+# reports X-ray captures by flipping byte 28 (the calib slot, meaningless without an IMU).
+DEVICE_ALIASES = {
+    "left":       ("Left Hand Tracker",  "Left Mini Tracker"),
+    "right":      ("Right Hand Tracker", "Right Mini Tracker"),
+    "left-foot":  ("Left Foot Pedal",),   # byte-31 flip = toggle the shared X-ray
+    "right-foot": ("Right Foot Pedal",),  # byte-31 flip = one X-ray screen capture
 }
-PEDAL_NAMES = {
-    "left-foot":  "Left Foot Pedal",    # byte-31 flip = toggle the shared X-ray
-    "right-foot": "Right Foot Pedal",   # byte-31 flip = one X-ray screen capture
-}
-DEVICE_NAMES = {**HAND_NAMES, **PEDAL_NAMES}
+DEVICE_NAMES = {dev: " / ".join(names) for dev, names in DEVICE_ALIASES.items()}  # for logs
 
 PORT = 8765
 PACKET = struct.Struct("<7f4B")           # w x y z ax ay az, calib, touchStart, touchCurrent, xrayOn = 32 bytes
@@ -52,17 +54,26 @@ state = {
     for dev in DEVICE_NAMES
 }
 master_xray = False                       # single shared X-ray state (hands + left pedal toggle it)
-capture_count = 0                         # total X-ray captures fired by the right pedal
-last_xray_bit = {dev: 0 for dev in DEVICE_NAMES}   # per-device toggle bit, for edge detection
+capture_count = 0                         # total X-ray captures (right pedal + mini capture buttons)
+last_xray_bit = {dev: 0 for dev in DEVICE_NAMES}      # per-device byte-31 bit, for edge detection
+last_capture_bit = {dev: 0 for dev in DEVICE_NAMES}   # per-device byte-28 bit (Mini trackers only)
 busy: set[str] = set()                    # devices currently connecting/connected
 websockets: set[web.WebSocketResponse] = set()
 
 
-def on_packet(dev: str, data: bytearray) -> None:
+def on_packet(dev: str, data: bytearray, mini: bool = False) -> None:
     global master_xray, capture_count
     if len(data) < PACKET.size:
         return
     w, x, y, z, ax, ay, az, calib, tStart, tCur, xrayBit = PACKET.unpack(bytes(data[:PACKET.size]))
+    # Mini trackers have no IMU and repurpose the calib byte as a capture-toggle bit.
+    # (Real trackers' calib legitimately changes 0-3, so this ONLY applies to minis.)
+    if mini:
+        if calib != last_capture_bit[dev]:
+            last_capture_bit[dev] = calib
+            capture_count += 1
+            print(f"[capture] {dev} mini button -> X-RAY CAPTURE #{capture_count}")
+        calib = 0   # don't show the flip bit as a calibration value
     # Every board flips xrayBit on each button/pedal press; the MEANING depends on who sent it:
     # the right foot pedal fires one screen capture, everything else toggles the shared X-ray.
     if xrayBit != last_xray_bit[dev]:
@@ -77,21 +88,21 @@ def on_packet(dev: str, data: bytearray) -> None:
                       touchStart=tStart, touchCurrent=tCur, touchActive=1 if tCur > 0 else 0)
 
 
-async def serve_device(hand: str, device) -> None:
+async def serve_device(dev: str, device, mini: bool = False) -> None:
     """Hold the connection to one board, route its notifications, retry on drop."""
     disconnected = asyncio.Event()
     try:
         async with BleakClient(device, disconnected_callback=lambda _: disconnected.set()) as client:
-            await client.start_notify(CHAR_UUID, lambda _, data: on_packet(hand, data))
-            state[hand]["connected"] = True
-            print(f"[{hand}] connected: {device.name or device.address}")
+            await client.start_notify(CHAR_UUID, lambda _, data: on_packet(dev, data, mini))
+            state[dev]["connected"] = True
+            print(f"[{dev}] connected: {device.name or device.address}")
             await disconnected.wait()
     except Exception as e:
-        print(f"[{hand}] connection error: {e}")
+        print(f"[{dev}] connection error: {e}")
     finally:
-        state[hand]["connected"] = False
-        busy.discard(hand)
-        print(f"[{hand}] disconnected — will rescan")
+        state[dev]["connected"] = False
+        busy.discard(dev)
+        print(f"[{dev}] disconnected — will rescan")
 
 
 async def scan_loop() -> None:
@@ -119,10 +130,10 @@ async def scan_loop() -> None:
                 print(f"  BLE names in range: {', '.join(named)}")
             for device, adv in found.values():
                 name = adv.local_name or device.name or ""
-                for dev, expected in DEVICE_NAMES.items():
-                    if expected in name and dev not in busy:
+                for dev, aliases in DEVICE_ALIASES.items():
+                    if dev not in busy and any(a in name for a in aliases):
                         busy.add(dev)
-                        asyncio.create_task(serve_device(dev, device))
+                        asyncio.create_task(serve_device(dev, device, mini="Mini" in name))
         await asyncio.sleep(2)
 
 

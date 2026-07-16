@@ -109,7 +109,15 @@ their badges under the X-ray banner flip to green **Connected** just like the ha
   brief white full-screen flash (fluoro-shot style). The dashboard only counts and flashes —
   what a "capture" saves is up to each consumer (the visionOS app will define its own action).
 
-All four devices are independent BLE connections; any subset may be on at a time.
+All devices are independent BLE connections; any subset may be on at a time.
+
+### 10. Mini trackers
+The ESP32-C3 0.42"-OLED glove units (`../firmware/left-mini/`, `../firmware/right-mini/` —
+SoftPot + X-ray button + capture button, no IMU) are **drop-in alternatives for the hand
+slots**: "Left Mini Tracker" fills the same card as "Left Hand Tracker" (first one found
+wins the slot). The cube stays frozen (identity quaternion — orientation comes from the
+headset), but the SoftPot track, the simulation panel's grab/twist, the shared X-ray
+toggle, and the capture counter/flash all work exactly as with the big trackers.
 
 ### 8. Latency feel
 Twist a sensor sharply — the cube should respond with no perceptible lag (the link runs at
