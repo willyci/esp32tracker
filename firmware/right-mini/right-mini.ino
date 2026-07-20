@@ -120,7 +120,10 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 void setupBLE() {
   Serial.println("[BLE] init...");
   NimBLEDevice::init(DEVICE_NAME);
-  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+  // P3 (not the P9 max the big trackers use): every BLE transmit is a current SPIKE, and
+  // on battery power (LiPo → 5V pin) the spikes sag the 3.3V rail and flicker the OLED.
+  // P3 halves the spike and is plenty for glove-to-headset/PC range.
+  NimBLEDevice::setPower(ESP_PWR_LVL_P3);
 
   NimBLEServer* server = NimBLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
@@ -132,6 +135,10 @@ void setupBLE() {
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(SERVICE_UUID);
   adv->setScanResponse(true);
+  // Advertise less often (units of 0.625 ms → ~320-400 ms): fewer radio bursts per second
+  // while waiting for a connection = less rail sag on battery. Discovery still takes <2 s.
+  adv->setMinInterval(512);
+  adv->setMaxInterval(640);
   NimBLEAdvertisementData scanData;
   scanData.setName(DEVICE_NAME);
   adv->setScanResponseData(scanData);
