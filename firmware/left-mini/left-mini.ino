@@ -161,7 +161,19 @@ void readSoftPot() {
   pkt.touchCurrent = (uint8_t)softpotEMA;
 }
 
+// Only push pixels when something CHANGED. On battery, each full-buffer redraw is a
+// current burst that can dip the 3.3V rail (LiPo→5V-pin leaves the LDO little headroom)
+// and make the screen flicker at the refresh rate — a static screen draws no burst.
+struct OledState { bool conn; bool xray; uint32_t cap; uint8_t touch; };
+static OledState lastDrawn = { false, false, 0xFFFFFFFF, 255 };   // force first draw
+
 void drawOLED() {
+  OledState now = { deviceConnected, xrayState, captureCount, pkt.touchCurrent };
+  if (now.conn == lastDrawn.conn && now.xray == lastDrawn.xray &&
+      now.cap == lastDrawn.cap && now.touch == lastDrawn.touch)
+    return;
+  lastDrawn = now;
+
   char buf[16];
   display.clearBuffer();
   display.setFont(u8g2_font_6x10_tr);   // 72px wide = 12 chars, 40px = 4 lines
@@ -202,6 +214,8 @@ void setup() {
 
   Serial.println("[OLED] begin (72x40, hardware I2C SDA=5 SCL=6)...");
   display.begin();
+  display.setContrast(64);   // ~quarter brightness — cuts OLED current a lot; still
+                             // easily readable, and less rail sag on battery power
   drawOLED();
 
   setupBLE();
