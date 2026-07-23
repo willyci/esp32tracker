@@ -6,12 +6,19 @@ struct ContentView: View {
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @State private var simOpen = false
+    @State private var flashOpacity: Double = 0   // white flash on each X-ray capture
 
     var body: some View {
         HStack(alignment: .top, spacing: 28) {
-            OrientationScene(left: ble.left, right: ble.right, xrayOn: ble.xrayOn)
-                .frame(minWidth: 760, minHeight: 380)   // wide enough for both cubes + spin room
-                .glassBackgroundEffect()
+            // Left column: 3D viewport on top, live event log filling the space below.
+            VStack(spacing: 18) {
+                OrientationScene(left: ble.left, right: ble.right, xrayOn: ble.xrayOn)
+                    .frame(minWidth: 760, minHeight: 380)   // wide enough for both cubes + spin room
+                    .glassBackgroundEffect()
+
+                LogPanel(ble: ble)
+                    .frame(maxHeight: .infinity)
+            }
 
             VStack(spacing: 18) {
                 // Shared X-ray state — either hand's hardware button (or a tap here) flips it.
@@ -25,6 +32,37 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(ble.xrayOn ? .green : .gray)
+
+                // Capture (right foot pedal, or tap here): freezes the sim state + flashes.
+                Button {
+                    ble.captureXray()
+                } label: {
+                    Label("Capture X-ray  (\(ble.captureCount))", systemImage: "camera.fill")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+
+                // Foot pedals: left toggles X-ray, right captures.
+                HStack(spacing: 14) {
+                    ForEach(Pedal.allCases, id: \.self) { pedal in
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(ble.isConnected(pedal) ? .green : .gray)
+                                .frame(width: 8, height: 8)
+                            Text(pedal.label)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                    if let last = sim.snapshots.last {
+                        Text("last: \(last.takenAt.formatted(date: .omitted, time: .standard)) · C \(String(format: "%.1f", last.catheter.insertion * 100))cm · W \(String(format: "%.1f", last.wire.insertion * 100))cm")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
 
                 // Catheter/wire simulation: grab = SoftPot touch, twist = slide + roll,
                 // insertion = hand movement (needs the immersive space for hand tracking).
@@ -65,12 +103,54 @@ struct ContentView: View {
             .frame(width: 640)
         }
         .padding(28)
+        .overlay {
+            // Camera-flash acknowledging each capture (same idea as the PC dashboard).
+            Color.white
+                .opacity(flashOpacity)
+                .allowsHitTesting(false)
+        }
+        .onChange(of: ble.captureCount) {
+            flashOpacity = 0.8
+            withAnimation(.easeOut(duration: 0.35)) { flashOpacity = 0 }
+        }
         .task {
             // Open the catheter/wire simulation immediately on launch — no extra step.
             if !simOpen, await openImmersiveSpace(id: "simulation") == .opened {
                 simOpen = true
             }
         }
+    }
+}
+
+/// Live BLE event log — the app usually runs untethered, so this replaces the
+/// Xcode console: discovery, connections, disconnections, X-ray and captures.
+struct LogPanel: View {
+    @ObservedObject var ble: BLEManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Log").font(.subheadline.bold())
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(ble.logEntries) { entry in
+                            Text("\(entry.time.formatted(date: .omitted, time: .standard))  \(entry.message)")
+                                .font(.caption.monospaced())
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .id(entry.id)
+                        }
+                    }
+                }
+                .onChange(of: ble.logEntries.count) {
+                    // Keep the newest line in view.
+                    if let last = ble.logEntries.last {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
 }
 

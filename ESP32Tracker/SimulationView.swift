@@ -18,7 +18,7 @@ struct SimulationView: View {
     static let wireLength: Float = 0.65
 
     var body: some View {
-        RealityView { content in
+        RealityView { content, attachments in
             let root = Entity()
             root.name = "root"
             root.position = [0, 1.0, -0.6]   // chest height, in front of the user
@@ -29,8 +29,15 @@ struct SimulationView: View {
                                        radius: 0.012, colorA: .systemTeal, colorB: .white))
             root.addChild(Self.makeRod(name: "wire", length: Self.wireLength,
                                        radius: 0.005, colorA: .systemPurple, colorB: .white))
+
+            // Floating device-status panel above the vessel — visible while immersed,
+            // when the playground window (with its own indicators) may be out of view.
+            if let status = attachments.entity(for: "deviceStatus") {
+                status.position = [0, 0.28, 0]
+                root.addChild(status)
+            }
             content.add(root)
-        } update: { content in
+        } update: { content, _ in
             guard let root = content.entities.first(where: { $0.name == "root" }) else { return }
             if let c = root.findEntity(named: "catheter") {
                 c.position.x = Self.catheterLength / 2 - sim.catheter.insertion
@@ -42,8 +49,36 @@ struct SimulationView: View {
                 w.position.x = Self.wireLength / 2 - sim.wire.insertion
                 w.orientation = simd_quatf(angle: sim.wire.twist, axis: [1, 0, 0])
             }
+        } attachments: {
+            Attachment(id: "deviceStatus") {
+                deviceStatusPanel
+            }
         }
         .task { await trackHands() }
+    }
+
+    /// Connection dots for all four boards (green = connected, red = not).
+    private var deviceStatusPanel: some View {
+        HStack(spacing: 18) {
+            statusDot("L hand", ble.left.connection == .connected)
+            statusDot("R hand", ble.right.connection == .connected)
+            ForEach(Pedal.allCases, id: \.self) { pedal in
+                statusDot(pedal.label, ble.isConnected(pedal))
+            }
+        }
+        .font(.callout)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .glassBackgroundEffect()
+    }
+
+    private func statusDot(_ label: String, _ connected: Bool) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(connected ? Color.green : Color.red)
+                .frame(width: 10, height: 10)
+            Text(label)
+        }
     }
 
     /// ARKit hand tracking: each hand's world-X movement drives its grabbed tool.

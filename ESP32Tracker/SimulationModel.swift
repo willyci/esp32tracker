@@ -22,6 +22,20 @@ final class SimulationModel: ObservableObject {
     @Published private(set) var catheter = Tool()   // left hand
     @Published private(set) var wire = Tool()       // right hand
 
+    /// One X-ray capture (fired by the right foot pedal): freezes the sim state at that moment.
+    struct XraySnapshot: Identifiable {
+        let id = UUID()
+        let takenAt: Date
+        let catheter: Tool
+        let wire: Tool
+        let xrayOn: Bool
+    }
+    @Published private(set) var snapshots: [XraySnapshot] = []
+
+    func recordSnapshot(xrayOn: Bool) {
+        snapshots.append(XraySnapshot(takenAt: Date(), catheter: catheter, wire: wire, xrayOn: xrayOn))
+    }
+
     // Same limits/scales as VascCath: catheter 0–0.58 m @ 0.635, wire 0–0.61 m @ 0.63.
     private static let maxInsertion: [Hand: Float] = [.left: 0.58, .right: 0.61]
     private static let insertionScale: [Hand: Float] = [.left: 0.635, .right: 0.63]

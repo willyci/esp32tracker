@@ -7,8 +7,14 @@ struct ESP32TrackerApp: App {
 
     init() {
         let ble = BLEManager()
+        let sim = SimulationModel(ble: ble)
+        // Right foot pedal (or the UI's capture button) → freeze the sim state.
+        ble.onXrayCapture = { [weak ble] in
+            guard let ble else { return }
+            sim.recordSnapshot(xrayOn: ble.xrayOn)
+        }
         _ble = StateObject(wrappedValue: ble)
-        _sim = StateObject(wrappedValue: SimulationModel(ble: ble))
+        _sim = StateObject(wrappedValue: sim)
     }
 
     var body: some Scene {
