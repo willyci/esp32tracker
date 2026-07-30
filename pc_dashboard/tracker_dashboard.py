@@ -137,7 +137,12 @@ def on_pedal_ad(pedal: str, mfg_data: dict[int, bytes], now: float) -> None:
     last_pedal_seen[pedal] = now
     state[pedal]["connected"] = True
     if first_sighting:
-        print(f"[{pedal}] detected (broadcast)")
+        print(f"[{pedal}] detected (broadcast) — mfg payload {len(payload)}B: {payload.hex(' ')}")
+        # A LEVEL pedal running pre-hold-to-activate firmware sends no level byte, so it
+        # would sit there looking "Detected" while never activating. Say so, don't go quiet.
+        if pedal in ("left-foot", "dsa-foot") and len(payload) < 2:
+            print(f"[{pedal}] !! OLD FIRMWARE: broadcast has no level byte, so hold-to-"
+                  f"activate CANNOT work. Reflash firmware/{pedal}/{pedal}.ino")
 
     count = payload[0]
     level = bool(payload[1]) if len(payload) > 1 else False
