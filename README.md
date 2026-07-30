@@ -1,19 +1,27 @@
 # esp32tracker
 
-A prototype that streams hardware IMU orientation to an **Apple Vision Pro** app and rotates 3D
-objects in real time. Two trackers — **left** and **right hand** — each drive their own object.
+A catheter/guidewire training prototype for **Apple Vision Pro**. Hand-worn ESP32 trackers drive the
+tools; ESP32 foot pedals drive the imaging controls a real fluoro suite puts on the floor.
 
 ```
-┌──────────────────────┐    BLE notify ~50 Hz    ┌───────────────────────────┐
-│ ESP32-C3 + BNO085 ×2 │ ──────────────────────► │   visionOS app            │
-│ Left + Right hand    │   32-byte packet each   │   SwiftUI + RealityKit    │
-│ (fused quaternion)   │                         │   two objects             │
-└──────────────────────┘                         └───────────────────────────┘
+┌────────────────────────────┐                          ┌──────────────────────────┐
+│ HANDS   ESP32-C3 ×2        │ ── CONNECTION ─────────► │ visionOS app             │
+│ IMU + SoftPot, one/glove   │    notify ~50 Hz,        │ SwiftUI + RealityKit     │
+│                            │    32-byte packet        │                          │
+├────────────────────────────┤                          │ PC dashboard             │
+│ PEDALS  ESP32-S3 ×3        │ ── BROADCAST ──────────► │ (same protocol, no       │
+│ fluoro · capture · DSA      │    advertising mfg data │  headset needed)         │
+└────────────────────────────┘                          └──────────────────────────┘
 ```
+
+**Two transports, deliberately.** Vision Pro has a small BLE connection budget — with both hands
+connected, a third connection fails with `CBError 11 "connection limit reached"`. So only the hands
+connect (they stream continuous orientation and need to). The pedals never connect: each advertises
+its state in manufacturer data, and consumers read it straight out of a continuous scan. That also
+means any number of pedals can be added without spending a connection slot.
 
 Each IMU does the sensor fusion onboard and sends a drift-corrected quaternion; the app stays simple
-and just renders it. The two boards share the same BLE service/characteristic UUIDs and are told apart
-by their advertised name (`Left Hand Tracker` / `Right Hand Tracker`).
+and just renders it. All boards share one BLE service UUID and are told apart by advertised name.
 
 > **Orientation only** — position tracking is out of scope. An IMU alone cannot recover position
 > (double-integrating acceleration drifts to meters within seconds), so these trackers report how each
@@ -53,8 +61,25 @@ by their advertised name (`Left Hand Tracker` / `Right Hand Tracker`).
 | [`FRAME_MAPPING.md`](FRAME_MAPPING.md) | How sensor axes map to RealityKit, and how to calibrate it |
 | [`project.yml`](project.yml) | XcodeGen config — generates the visionOS Xcode project |
 | [`ESP32Tracker/`](ESP32Tracker/) | The visionOS app (SwiftUI + RealityKit + Core Bluetooth) |
-| [`firmware/`](firmware/) | The ESP32-C3 Arduino sketch + PlatformIO config |
-| [`pc_dashboard/`](pc_dashboard/) | Browser dashboard to test both trackers + the simulation model without the headset |
+| [`firmware/`](firmware/) | One Arduino sketch folder per board — see the table below |
+| [`pc_dashboard/`](pc_dashboard/) | Browser dashboard: drive and verify every board, and the whole simulation model, without the headset |
+
+### Boards
+
+Each board gets its own sketch folder (Arduino requires the folder name to match the `.ino`).
+Paired sketches are byte-identical apart from one `#define`, so **regenerate rather than hand-edit
+both**.
+
+| Board | Sketch | BLE name | Role |
+|---|---|---|---|
+| Hand tracker ×2 | [`left/`](firmware/left/) · [`right/`](firmware/right/) | `Left/Right Hand Tracker` | IMU orientation + SoftPot (connected) |
+| Mini tracker ×2 | [`left-mini/`](firmware/left-mini/) · [`right-mini/`](firmware/right-mini/) | `Left/Right Mini Tracker` | no IMU: SoftPot + 2 buttons + onboard OLED (connected) |
+| Fluoro pedal | [`left-foot/`](firmware/left-foot/) | `Left Foot Pedal` | **hold** = X-ray on (broadcast) |
+| Capture pedal | [`right-foot/`](firmware/right-foot/) | `Right Foot Pedal` | press = one X-ray capture (broadcast) |
+| DSA pedal | [`dsa-foot/`](firmware/dsa-foot/) | `DSA Foot Pedal` | **hold** = contrast run (broadcast) |
+
+A Mini tracker is a drop-in alternative for a hand slot — the dashboard and app accept either name
+for the same hand. Its quaternion stays identity (orientation comes from ARKit hand tracking).
 
 ## Hardware
 
@@ -72,6 +97,23 @@ Two identical trackers (one per hand), each mounted on the back of a glove:
 
 The left/right sketches differ by one `#define IS_LEFT_HAND` line (which picks the BLE name). Wiring
 and flashing steps are in [`firmware/README.md`](firmware/README.md).
+
+### Mini trackers (ESP32-C3 with 0.42" OLED)
+
+A simpler glove unit with **no IMU** — for when orientation comes from ARKit hand tracking and you
+only need the touch/button inputs. Status shows on the board's own 72×40 OLED.
+
+| Function | Pins | Notes |
+|---|---|---|
+| SoftPot wiper | GPIO0 | ADC; internal pulldown enabled, so no external resistor |
+| X-ray button | GPIO8 (sense) ↔ GPIO7 (gnd) | GPIO8 is strapping, so it **must** be the pull-up sense pin |
+| Capture button | GPIO3 ↔ GPIO4 | |
+| Onboard OLED | GPIO5 / GPIO6 | hardware I2C, already wired on the board |
+
+C3 pin constraints that shaped this: ADC exists only on GPIO0–4, GPIO2 is strapping (a floating
+SoftPot wiper there can stop the boot), GPIO9 is the BOOT button. **The SoftPot's centre pin is the
+wiper — the outer two are the strip ends and take 3V3/GND.** Powering it across the wiper shorts when
+the strip is pressed near the far end; that burned a wire once.
 
 ### Foot pedals (ESP32-S3 SuperMini, one per pedal)
 
@@ -93,13 +135,20 @@ safe: a few seconds of radio silence ends the run / turns X-ray off rather than 
 ## Quick start
 
 ### 1. Firmware
-```
-cd firmware
-pio run -t upload      # then: pio device monitor
-```
-Confirm the serial log shows `BNO08x ready` and `BLE advertising as Left Hand Tracker` (or
-`Right Hand Tracker`). Flash both boards — set `IS_LEFT_HAND` per board. Verify the BLE data with a
-phone scanner (nRF Connect) **before** touching the app — see [`firmware/README.md`](firmware/README.md).
+
+Open the board's own sketch folder and upload it (Arduino IDE, or `arduino-cli upload -p PORT
+--fqbn ... firmware/<folder>`). Toolchain is pinned: **ESP32 core 2.0.17** (3.x crashes with
+NimBLE) and **NimBLE-Arduino 1.4.x** (not 2.x), USB CDC On Boot enabled, 115200 baud.
+
+> **Flash the sketch you think you're flashing.** Arduino uploads the *focused editor tab*, not the
+> file you last opened — swapping the USB cable without switching tabs silently flashes the same
+> sketch twice. This has bitten this project more than once (two boards both announcing themselves
+> as `RIGHT`). Always confirm from the serial banner, which names the board it's running:
+> `Device: Left Foot Pedal — LEFT FOOT (X-ray while held)`.
+
+Then verify before touching the app: the [PC dashboard](pc_dashboard/) sees every board over the
+same protocol the headset uses, and prints each pedal's raw broadcast payload as it appears. A phone
+scanner (nRF Connect) also works.
 
 ### 2. visionOS app
 ```
@@ -120,8 +169,40 @@ buttons (per hand, or "Re-center both").
 Working prototype. Milestones reached (see [`SPEC.md`](SPEC.md)): connect → display raw data → rotate
 objects → SoftPot touch events + X-ray button → **catheter/wire simulation** (the app opens an immersive
 space where the SoftPot grabs, strip-slide + tracker roll twists, and Vision Pro hand tracking
-advances/retracts a catheter and guidewire — the same interaction model as the VascCath trainer).
-IMU-based position tracking remains out of scope.
+advances/retracts a catheter and guidewire — the same interaction model as the VascCath trainer) →
+**foot pedals** for fluoro, capture and DSA contrast runs. IMU-based position tracking remains out of
+scope.
+
+Imaging state is *derived*, not stored: `latched (hand buttons toggle) OR fluoro-pedal-held OR
+dsa-active`. Releasing a pedal returns to whatever the buttons had latched. Both the app and the
+dashboard implement this identically — change one, change the other.
+
+## Continuing on the Mac
+
+Pull first — the Windows side pushes firmware and dashboard work, the Mac side pushes the app.
+
+**Unverified Swift.** These were written on Windows and have **never seen a compiler**, so expect to
+fix small things:
+
+- `ESP32Tracker/BLEManager.swift` — pedal levels (hold-to-activate), `.dsaFoot` case, derived
+  `xrayOn`, two-stage silence timeouts
+- `ESP32Tracker/ContentView.swift` — DSA run/fault readout
+- `ESP32Tracker/SimulationView.swift` — named vessel entity + contrast fill during a DSA run
+
+**Known gaps on the app side:**
+
+- The app doesn't recognise the **Mini tracker** names yet (`Hand.from(advertisedName:)` only matches
+  `Left/Right Hand Tracker`), so a Mini board won't fill a hand slot in the headset. The dashboard
+  already accepts either name.
+- **What a "capture" actually does** is still undefined beyond incrementing a counter and recording a
+  sim snapshot. The right pedal and Mini capture button both fire it.
+- `onDSARunStart` is a hook with no consumer — the natural home for recording/playing back a run.
+
+**Tuning worth revisiting on device:** the pedal silence windows (`levelReleaseAfter` = 4 s,
+`pedalOfflineAfter` = 5 s) were sized from *Windows* measurements, where the OS aggregates repeat
+advertisements and delivers only ~1–3 ads/s. CoreBluetooth with `allowDuplicates` may deliver far
+more densely; if the status dots and X-ray hold prove rock solid on the headset, these can be
+tightened — which shortens how long a dead pedal takes to release X-ray.
 
 ## Notes
 
@@ -131,3 +212,16 @@ IMU-based position tracking remains out of scope.
 - BLE UUIDs and the 32-byte packet layout are defined once in [`SPEC.md`](SPEC.md) and must match in
   the firmware (`firmware/left/left.ino`, `firmware/right/right.ino`) and the app
   (`ESP32Tracker/TrackerState.swift` for packet parsing, `ESP32Tracker/BLEManager.swift` for UUIDs).
+- **Pedals use a second, unrelated protocol**: advertising manufacturer data under company ID
+  `0xFFFF`, laid out `[count, level(, flags)]` after the ID. `count` increments per press, `level` is
+  a live 0/1 (the hold pedals' whole point), and the DSA pedal adds `flags` bit0 = switch wiring
+  fault. Consumers index fixed positions and tolerate short payloads, so **old firmware degrades
+  instead of breaking** — a pre-level board simply never reports "held". Both consumers parse this:
+  `tracker_dashboard.on_pedal_ad` and `BLEManager.handlePedalAd`.
+- **Don't size consumer timeouts from the firmware's advertising interval.** Measured: a pedal
+  sending ~7–10 ads/s was delivered at ~1–3/s with gaps to ~3 s, because the host OS aggregates
+  repeat advertisements. WinRT's `SignalStrengthFilter` sampling interval makes it *worse*, not
+  better. Measure, don't assume.
+- The Mini trackers repurpose the packet's `calib` byte (meaningless with no IMU) as a
+  capture-toggle bit. This applies to Mini boards only — a real tracker's `calib` legitimately
+  changes 0–3.
