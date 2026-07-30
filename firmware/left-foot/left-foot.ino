@@ -85,9 +85,9 @@ void setupBLE() {
   adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(SERVICE_UUID);   // so the app's service-filtered scan finds us
   adv->setScanResponse(true);
-  // Advertise FAST (units of 0.625 ms → 100/150 ms). A dead-man pedal's on/off latency is
-  // one advertising interval, so the NimBLE default (~1.28 s) would feel badly sluggish.
-  // 100 ms keeps hold/release crisp; the pedal is mains-idle most of the time anyway.
+  // Advertise fast and EXPLICITLY (units of 0.625 ms → 100/150 ms). A pedal's on/off
+  // latency is one advertising interval, and that matters for a dead-man switch, so pin it
+  // here rather than inheriting whatever the stack/controller happens to default to.
   adv->setMinInterval(160);
   adv->setMaxInterval(240);
   NimBLEAdvertisementData scanData;

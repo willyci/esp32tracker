@@ -97,8 +97,9 @@ void setupBLE() {
   adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(SERVICE_UUID);   // so the app's service-filtered scan finds us
   adv->setScanResponse(true);
-  // Advertise FAST (units of 0.625 ms → 100/150 ms). A level control's on/off latency is
-  // one advertising interval, so the NimBLE default (~1.28 s) would feel badly sluggish.
+  // Advertise fast and EXPLICITLY (units of 0.625 ms → 100/150 ms). A level control's
+  // on/off latency is one advertising interval, so pin it here rather than inheriting
+  // whatever the stack/controller happens to default to.
   adv->setMinInterval(160);
   adv->setMaxInterval(240);
   NimBLEAdvertisementData scanData;
