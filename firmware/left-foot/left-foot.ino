@@ -85,9 +85,12 @@ void setupBLE() {
   adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(SERVICE_UUID);   // so the app's service-filtered scan finds us
   adv->setScanResponse(true);
-  // Advertise fast and EXPLICITLY (units of 0.625 ms → 100/150 ms). A pedal's on/off
-  // latency is one advertising interval, and that matters for a dead-man switch, so pin it
-  // here rather than inheriting whatever the stack/controller happens to default to.
+  // Advertise fast and EXPLICITLY (units of 0.625 ms → 100/150 ms), so on-air latency is
+  // pinned here rather than inherited from the stack's default.
+  // REALITY CHECK: sending fast does NOT mean the consumer hears it fast. Measured on the
+  // Windows dashboard, this pedal's ~7-10 ads/s arrived at only ~1-3/s with gaps up to ~3 s,
+  // because the host OS aggregates repeat advertisements. So don't size consumer-side
+  // timeouts from this interval — measure them. (See LEVEL_RELEASE_AFTER in the dashboard.)
   adv->setMinInterval(160);
   adv->setMaxInterval(240);
   NimBLEAdvertisementData scanData;

@@ -117,10 +117,20 @@ one. The PC dashboard follows the same design so both consumers behave identical
   brief white full-screen flash (fluoro-shot style). The dashboard only counts and flashes —
   what a "capture" saves is up to each consumer (the visionOS app defines its own action).
 
-**Fail-safe:** because the left pedal is a *level*, silence must not leave X-ray stuck on. If
-no advertisement arrives for 1.5 s (battery died, walked out of range, board crashed) the
-dashboard treats the pedal as released and turns X-ray off. Brief RF gaps are absorbed —
-the pedal advertises every ~100–150 ms, so 1.5 s is roughly ten missed ads.
+**Fail-safe:** because the left pedal is a *level*, silence must not leave X-ray stuck on. Two
+windows handle it (`LEVEL_RELEASE_AFTER` / `PEDAL_OFFLINE_AFTER` in `tracker_dashboard.py`):
+after **4 s** of silence a held level is released (battery died, out of range, board crashed),
+and after **5 s** the pedal is marked offline in the UI.
+
+Those look generous next to a pedal that advertises every ~100–150 ms, and they are — on
+purpose. **Sending fast is not the same as being heard fast:** measured on Windows, a pedal
+emitting ~7–10 ads/s was delivered to the dashboard at only **~1–3/s, with normal gaps up to
+~3 s**, because the host OS aggregates repeat advertisements from the same device. (WinRT's
+`SignalStrengthFilter` sampling interval was tried and measured to make delivery *worse*.) A
+tighter window just produces false "lost pedal" events and, worse, releases the pedal
+mid-press. Size these from measurement, not from the firmware interval — and note the
+consequence: a dead pedal takes a few seconds to clear. That is the right trade for a
+training simulator, where the alternative is X-ray flickering off during fluoro.
 
 Any subset of devices may be on at a time; the two hands use connections, the pedals don't.
 
@@ -152,8 +162,8 @@ both closed = miswired or NO-NC short. Either fault reports "not running" (never
 a suspect switch) and shows **DSA: SWITCH FAULT** in red on the dashboard and in the headset.
 A plain 2-wire button cannot distinguish "not pressed" from "not connected" at all.
 
-Same 1.5 s fail-safe as the fluoro pedal: if a pedal dies mid-run, the run ends and X-ray goes
-off rather than latching on forever.
+Same fail-safe as the fluoro pedal (4 s of silence): if a pedal dies mid-run, the run ends and
+X-ray goes off rather than latching on forever.
 
 ### 10. Mini trackers
 The ESP32-C3 0.42"-OLED glove units (`../firmware/left-mini/`, `../firmware/right-mini/` —

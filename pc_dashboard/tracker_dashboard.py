@@ -52,9 +52,17 @@ PEDAL_ALIASES = {
 ALL_ALIASES = {**DEVICE_ALIASES, **PEDAL_ALIASES}
 DEVICE_NAMES = {dev: " / ".join(names) for dev, names in ALL_ALIASES.items()}  # for logs
 
-# A pedal is a LEVEL control, so silence must fail safe: if we stop hearing a pedal for
-# this long, treat it as released/absent (never leave X-ray stuck on a dead pedal).
-PEDAL_STALE_AFTER = 1.5   # seconds (pedals advertise every ~100-150 ms)
+# How long silence has to last before we act on it. These are set from MEASUREMENT, not from
+# the firmware's advertising interval: a pedal advertising every 100-150 ms (~7-10/s) is only
+# delivered to this PC at ~1-3 ads/s, with normal gaps up to ~3 s. Windows/WinRT aggregates
+# repeat advertisements from the same device and there is no knob that fixes it (WinRT's
+# SignalStrengthFilter sampling interval was measured to make delivery WORSE, not better).
+# So anything under ~3 s produces false "lost pedal" events.
+PEDAL_OFFLINE_AFTER = 5.0   # mark the pedal offline in the UI (cosmetic — be generous)
+# Clearing a HELD level is the fail-safe, so it wants to be short; but too short and a real
+# RF gap releases the pedal mid-press, which is worse (X-ray flickering off during fluoro)
+# than a dead pedal taking a few seconds to clear. This is a training sim, not a live tube.
+LEVEL_RELEASE_AFTER = 4.0
 
 PORT = 8765
 PACKET = struct.Struct("<7f4B")           # w x y z ax ay az, calib, touchStart, touchCurrent, xrayOn = 32 bytes
@@ -176,28 +184,38 @@ def on_pedal_ad(pedal: str, mfg_data: dict[int, bytes], now: float) -> None:
 
 
 def expire_stale_pedals(now: float) -> None:
-    """Fail-safe: a pedal we can no longer hear counts as released and disconnected.
+    """Act on pedal silence, in two stages (see the timeout constants).
 
-    Both level pedals must fail safe — a pedal that dies mid-press would otherwise leave
-    X-ray (or a contrast run) latched on with no way to clear it.
+    LEVEL_RELEASE_AFTER — clear a held level. This is the fail-safe: a pedal that dies
+        mid-press must not leave X-ray or a contrast run latched on forever.
+    PEDAL_OFFLINE_AFTER — mark the pedal offline in the UI. Deliberately longer, because
+        normal advertisement gaps are seconds long and flapping the badge (and spamming
+        the console) on every gap made real problems impossible to spot.
     """
     global pedal_held, dsa_active, dsa_fault
     for pedal in PEDAL_ALIASES:
         seen = last_pedal_seen.get(pedal)
-        if seen is None or (now - seen) <= PEDAL_STALE_AFTER:
+        if seen is None:
             continue
-        del last_pedal_seen[pedal]
-        last_pedal_count.pop(pedal, None)
-        state[pedal]["connected"] = False
-        if pedal == "left-foot" and pedal_held:
-            pedal_held = False
-            print("[xray] left pedal LOST while held -> X-RAY OFF (fail-safe)")
-        if pedal == "dsa-foot":
-            if dsa_active:
+        silent = now - seen
+
+        # Stage 1: release any held level.
+        if silent > LEVEL_RELEASE_AFTER:
+            if pedal == "left-foot" and pedal_held:
+                pedal_held = False
+                print(f"[xray] left pedal silent {silent:.1f}s while held -> X-RAY OFF (fail-safe)")
+            if pedal == "dsa-foot" and dsa_active:
                 dsa_active = False
-                print("[dsa] pedal LOST mid-run -> run ENDED, X-RAY OFF (fail-safe)")
-            dsa_fault = False   # can't know the wiring state of a pedal we can't hear
-        print(f"[{pedal}] broadcast lost — will re-detect")
+                print(f"[dsa] pedal silent {silent:.1f}s mid-run -> run ENDED, X-RAY OFF (fail-safe)")
+
+        # Stage 2: it's been quiet long enough to call it gone.
+        if silent > PEDAL_OFFLINE_AFTER:
+            del last_pedal_seen[pedal]
+            last_pedal_count.pop(pedal, None)
+            state[pedal]["connected"] = False
+            if pedal == "dsa-foot":
+                dsa_fault = False   # can't know the wiring of a pedal we can't hear
+            print(f"[{pedal}] broadcast lost — will re-detect")
 
 
 async def serve_device(dev: str, device, mini: bool = False) -> None:

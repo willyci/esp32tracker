@@ -88,7 +88,7 @@ scan. Details in [`pc_dashboard/README.md`](pc_dashboard/README.md).
 
 The DSA pedal's 3-wire SPDT hookup reads both contacts, so its firmware also detects an unplugged
 or miswired switch and reports a fault instead of silently never firing. Both *hold* pedals fail
-safe: 1.5 s of radio silence ends the run / turns X-ray off rather than latching it on.
+safe: a few seconds of radio silence ends the run / turns X-ray off rather than latching it on.
 
 ## Quick start
 

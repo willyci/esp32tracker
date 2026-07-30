@@ -110,10 +110,17 @@ final class BLEManager: NSObject, ObservableObject {
     /// Pedal broadcast tracking: last press counter seen, and when last seen.
     private var lastPedalCount: [Pedal: UInt8] = [:]
     private var lastPedalSeen: [Pedal: Date] = [:]
-    /// The left pedal is a dead-man switch, so this doubles as the X-ray fail-safe window —
-    /// keep it short. Pedals advertise every ~100-150 ms, so 1.5 s is ~10 missed ads: long
-    /// enough to ride out RF gaps, short enough that a dead pedal can't hold X-ray on.
-    private let pedalStaleAfter: TimeInterval = 1.5
+    /// Silence windows, in two stages. Do NOT derive these from the firmware's advertising
+    /// interval: measured on the PC dashboard, a pedal advertising every 100-150 ms (~7-10/s)
+    /// was only *delivered* at ~1-3 ads/s with normal gaps up to ~3 s, because the OS
+    /// aggregates repeat advertisements. Anything under ~3 s produces false "lost" events.
+    ///
+    /// `levelReleaseAfter` is the dead-man fail-safe (clear a held level); `pedalOfflineAfter`
+    /// only drives the status dot, so it can be generous. Those numbers came from Windows —
+    /// CoreBluetooth with allowDuplicates may deliver more densely, so if the status dots and
+    /// X-ray hold prove rock solid on device, these can be tightened.
+    private let levelReleaseAfter: TimeInterval = 4.0
+    private let pedalOfflineAfter: TimeInterval = 5.0
 
     private var watchdog: Timer?
 
@@ -300,28 +307,32 @@ final class BLEManager: NSObject, ObservableObject {
         }
         if !stuck.isEmpty { pumpConnectQueue() }
 
-        // Expire pedals we haven't heard broadcast recently. The LEFT pedal is a level, so
-        // silence MUST fail safe: a pedal that dies (battery, range, crash) while held down
-        // would otherwise leave X-ray latched on with no way to clear it.
+        // Act on pedal silence in two stages. Releasing a held level is the fail-safe (a pedal
+        // that dies while down must not leave X-ray latched on); marking it offline is only a
+        // status dot, so it waits longer — normal advertisement gaps are seconds long, and
+        // flapping the dot on every gap hides real problems.
         for pedal in Pedal.allCases {
-            if pedalConnected[pedal] == true,
-               let seen = lastPedalSeen[pedal], now.timeIntervalSince(seen) > pedalStaleAfter {
-                pedalConnected[pedal] = false
-                lastPedalCount[pedal] = nil
-                log("\(pedal.rawValue) not heard for \(pedalStaleAfter)s — marking offline")
+            guard pedalConnected[pedal] == true, let seen = lastPedalSeen[pedal] else { continue }
+            let silent = now.timeIntervalSince(seen)
+
+            if silent > levelReleaseAfter {
                 if pedal == .leftFoot && pedalHeld {
                     pedalHeld = false
                     refreshXray()
-                    log("Left pedal lost while held — X-ray OFF (fail-safe)")
+                    log("Left pedal silent \(String(format: "%.1f", silent))s while held — X-ray OFF (fail-safe)")
                 }
-                if pedal == .dsaFoot {
-                    if dsaActive {
-                        dsaActive = false
-                        refreshXray()
-                        log("DSA pedal lost mid-run — run ENDED, X-ray OFF (fail-safe)")
-                    }
-                    dsaFault = false   // can't know the wiring of a pedal we can't hear
+                if pedal == .dsaFoot && dsaActive {
+                    dsaActive = false
+                    refreshXray()
+                    log("DSA pedal silent \(String(format: "%.1f", silent))s mid-run — run ENDED (fail-safe)")
                 }
+            }
+
+            if silent > pedalOfflineAfter {
+                pedalConnected[pedal] = false
+                lastPedalCount[pedal] = nil
+                if pedal == .dsaFoot { dsaFault = false }   // unknown wiring once it's gone
+                log("\(pedal.rawValue) not heard for \(pedalOfflineAfter)s — marking offline")
             }
         }
 
