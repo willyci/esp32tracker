@@ -73,6 +73,23 @@ Two identical trackers (one per hand), each mounted on the back of a glove:
 The left/right sketches differ by one `#define IS_LEFT_HAND` line (which picks the BLE name). Wiring
 and flashing steps are in [`firmware/README.md`](firmware/README.md).
 
+### Foot pedals (ESP32-S3 SuperMini, one per pedal)
+
+Hands-free controls for the things a real fluoro suite puts on the floor. Vision Pro runs out of
+BLE connection slots with both hands connected (`CBError 11`), so pedals **never connect** — each
+one broadcasts its state in advertising manufacturer data and consumers read it from a continuous
+scan. Details in [`pc_dashboard/README.md`](pc_dashboard/README.md).
+
+| Pedal | Sketch | Wiring | Behaviour |
+|---|---|---|---|
+| **Fluoro** (X-ray) | [`firmware/left-foot/`](firmware/left-foot/) | button across GPIO12↔11 | **hold** = X-ray on (dead-man switch) |
+| **Capture** | [`firmware/right-foot/`](firmware/right-foot/) | button across GPIO9↔8 | press = one X-ray screen capture |
+| **DSA** (contrast run) | [`firmware/dsa-foot/`](firmware/dsa-foot/) | SPDT: COM→GPIO12, NO→GPIO10, NC→GPIO8 | **hold** = contrast run (implies X-ray) |
+
+The DSA pedal's 3-wire SPDT hookup reads both contacts, so its firmware also detects an unplugged
+or miswired switch and reports a fault instead of silently never firing. Both *hold* pedals fail
+safe: 1.5 s of radio silence ends the run / turns X-ray off rather than latching it on.
+
 ## Quick start
 
 ### 1. Firmware

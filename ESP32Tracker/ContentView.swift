@@ -43,7 +43,25 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
 
-                // Foot pedals: left toggles X-ray, right captures.
+                // DSA (contrast run) — driven by the DSA pedal's level, shown here so the
+                // run and the switch's self-check are visible without the pedal in view.
+                HStack(spacing: 10) {
+                    Label(ble.dsaActive ? "DSA RUN — CONTRAST" : "DSA idle",
+                          systemImage: ble.dsaActive ? "waveform.path.ecg" : "drop")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(ble.dsaActive ? .orange : .secondary)
+                    Text("runs: \(ble.dsaRuns)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if ble.dsaFault {
+                        Label("SWITCH FAULT", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.red)
+                    }
+                    Spacer()
+                }
+
+                // Foot pedals: left = X-ray while held, right = capture, DSA = contrast run.
                 HStack(spacing: 14) {
                     ForEach(Pedal.allCases, id: \.self) { pedal in
                         HStack(spacing: 6) {

@@ -2,14 +2,21 @@ import Foundation
 import CoreBluetooth
 import simd
 
-/// Which foot pedal a peripheral is. Pedals are CONNECTIONLESS — they broadcast a press
-/// counter in their advertising manufacturer data and we read it from the scan (never
-/// connect). Meaning is keyed by the advertised name (set by IS_LEFT_FOOT in firmware).
+/// Which foot pedal a peripheral is. Pedals are CONNECTIONLESS — they broadcast their state
+/// in advertising manufacturer data and we read it from the scan (never connect). Meaning is
+/// keyed by the advertised name (set in firmware/{left,right,dsa}-foot).
 enum Pedal: String, CaseIterable {
-    case leftFoot  = "Left Foot Pedal"    // press = toggle the shared X-ray
-    case rightFoot = "Right Foot Pedal"   // press = fire one X-ray capture
+    case leftFoot  = "Left Foot Pedal"    // LEVEL: X-ray on while held (dead-man switch)
+    case rightFoot = "Right Foot Pedal"   // press  = fire one X-ray capture
+    case dsaFoot   = "DSA Foot Pedal"     // LEVEL: contrast run in progress (implies X-ray)
 
-    var label: String { self == .leftFoot ? "L foot (X-ray)" : "R foot (capture)" }
+    var label: String {
+        switch self {
+        case .leftFoot:  return "L foot (X-ray)"
+        case .rightFoot: return "R foot (capture)"
+        case .dsaFoot:   return "DSA (contrast run)"
+        }
+    }
 
     static func from(advertisedName name: String?) -> Pedal? {
         guard let name else { return nil }
@@ -38,8 +45,27 @@ final class BLEManager: NSObject, ObservableObject {
 
     @Published private(set) var bluetoothReady = false
 
-    /// Single shared X-ray state — either hand's button or the LEFT foot pedal toggles it.
+    /// Single shared X-ray state that the whole app reads. It is DERIVED from two
+    /// independent sources (see `refreshXray`): the hand buttons *latch* it on/off, while
+    /// the LEFT foot pedal is a dead-man switch that forces it on only while held.
     @Published private(set) var xrayOn = false
+
+    /// Latched by the hand-tracker X-ray buttons (and the in-app button): click on, click off.
+    private var latchedXray = false
+    /// The LEFT pedal's live broadcast level: true only while the foot is down.
+    private var pedalHeld = false
+
+    /// DSA (digital subtraction angiography) contrast run — the DSA pedal's live level.
+    /// True only while the run is on. A DSA run IS an X-ray acquisition, so this also
+    /// forces `xrayOn`; consumers additionally render contrast filling the vessels.
+    @Published private(set) var dsaActive = false
+    /// How many contrast runs have been taken this session.
+    @Published private(set) var dsaRuns = 0
+    /// DSA switch self-check: its COM/NO/NC wiring lets the firmware detect an unplugged
+    /// or miswired switch, which it reports instead of silently never firing.
+    @Published private(set) var dsaFault = false
+    /// Fired when a contrast run starts — hook for playing/recording the run.
+    var onDSARunStart: (() -> Void)?
 
     /// Total X-ray captures fired by the RIGHT foot pedal (or the UI).
     @Published private(set) var captureCount = 0
@@ -84,7 +110,10 @@ final class BLEManager: NSObject, ObservableObject {
     /// Pedal broadcast tracking: last press counter seen, and when last seen.
     private var lastPedalCount: [Pedal: UInt8] = [:]
     private var lastPedalSeen: [Pedal: Date] = [:]
-    private let pedalStaleAfter: TimeInterval = 5
+    /// The left pedal is a dead-man switch, so this doubles as the X-ray fail-safe window —
+    /// keep it short. Pedals advertise every ~100-150 ms, so 1.5 s is ~10 missed ads: long
+    /// enough to ride out RF gaps, short enough that a dead pedal can't hold X-ray on.
+    private let pedalStaleAfter: TimeInterval = 1.5
 
     private var watchdog: Timer?
 
@@ -93,7 +122,10 @@ final class BLEManager: NSObject, ObservableObject {
         left.onXrayToggle  = { [weak self] in self?.toggleXray() }
         right.onXrayToggle = { [weak self] in self?.toggleXray() }
         central = CBCentralManager(delegate: self, queue: nil)
-        watchdog = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+        // 0.5 s, not 3 s: this tick also enforces the left pedal's dead-man fail-safe, so a
+        // slow tick would let X-ray linger seconds after a held pedal dropped out. The work
+        // per tick is trivial (a couple of dictionary scans).
+        watchdog = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.maintenanceTick()
         }
     }
@@ -101,9 +133,20 @@ final class BLEManager: NSObject, ObservableObject {
     deinit { watchdog?.invalidate() }
 
     // MARK: Controls
+    /// Flip the latched X-ray state (hand buttons + the in-app button). While the left
+    /// pedal is held down X-ray stays on regardless; the latch is what you return to when
+    /// the foot comes off.
     func toggleXray() {
-        xrayOn.toggle()
+        latchedXray.toggle()
+        refreshXray()
         log("X-ray \(xrayOn ? "ON" : "OFF")")
+    }
+
+    /// Recompute the effective state. Either level pedal wins while it is down (a DSA run
+    /// is an X-ray acquisition by definition); otherwise the latch rules.
+    private func refreshXray() {
+        let newValue = latchedXray || pedalHeld || dsaActive
+        if newValue != xrayOn { xrayOn = newValue }
     }
 
     func captureXray() {
@@ -187,23 +230,54 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     // MARK: Pedals (connectionless)
-    /// Handle one pedal advertisement: mark it seen, and if its broadcast press counter
-    /// changed since last time, fire the pedal's event. First sighting only baselines.
+    /// Handle one pedal advertisement. Manufacturer data is [0xFF,0xFF, count, level(, flags)]:
+    ///   LEFT  pedal — `level` is a LIVE LEVEL, so X-ray follows the foot (dead-man switch).
+    ///                 Repeat advertisements carry the same level, hence the change checks.
+    ///   RIGHT pedal — a changed `count` fires exactly one capture; the first sighting only
+    ///                 baselines the counter so a relaunch can't fire a phantom capture.
+    ///   DSA   pedal — `level` is a LIVE LEVEL (contrast run in progress), `count` numbers
+    ///                 the runs, and `flags` bit0 reports a COM/NO/NC wiring fault.
     private func handlePedalAd(_ pedal: Pedal, _ advertisementData: [String: Any]) {
         let firstSighting = (pedalConnected[pedal] != true)
         pedalConnected[pedal] = true
         lastPedalSeen[pedal] = Date()
 
         guard let mfg = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
-              mfg.count >= 3 else { return }               // [0xFF,0xFF,count]
+              mfg.count >= 3 else { return }               // [0xFF,0xFF,count(,level(,flags))]
         let count = mfg[mfg.startIndex + 2]
+        // `level` is byte 3, `flags` byte 4. Firmware built before hold-to-activate omits
+        // them; treat a short packet as "not held / no fault" so an un-updated pedal still
+        // works (as a counter-only control).
+        let level = mfg.count >= 4 ? mfg[mfg.startIndex + 3] != 0 : false
+        let flags = mfg.count >= 5 ? mfg[mfg.startIndex + 4] : 0
 
         if firstSighting { log("\(pedal.rawValue) detected (broadcast)") }
 
-        if let last = lastPedalCount[pedal], count != last {
-            switch pedal {
-            case .leftFoot:  toggleXray()
-            case .rightFoot: captureXray()
+        switch pedal {
+        case .leftFoot:
+            if level != pedalHeld {
+                pedalHeld = level
+                refreshXray()
+                log("Left pedal \(level ? "DOWN" : "UP") — X-ray \(xrayOn ? "ON" : "OFF")")
+            }
+        case .rightFoot:
+            if let last = lastPedalCount[pedal], count != last { captureXray() }
+        case .dsaFoot:
+            let fault = (flags & 0x01) != 0
+            if fault != dsaFault {
+                dsaFault = fault
+                log(fault ? "DSA switch FAULT — check COM/NO/NC wiring"
+                          : "DSA switch wiring OK again")
+            }
+            if level != dsaActive {
+                dsaActive = level
+                refreshXray()
+                log("DSA contrast run \(level ? "START" : "END") — X-ray \(xrayOn ? "ON" : "OFF")")
+            }
+            if let last = lastPedalCount[pedal], count != last {
+                dsaRuns += 1
+                log("DSA run #\(dsaRuns)")
+                onDSARunStart?()
             }
         }
         lastPedalCount[pedal] = count
@@ -226,12 +300,28 @@ final class BLEManager: NSObject, ObservableObject {
         }
         if !stuck.isEmpty { pumpConnectQueue() }
 
-        // Expire pedals we haven't heard broadcast recently.
+        // Expire pedals we haven't heard broadcast recently. The LEFT pedal is a level, so
+        // silence MUST fail safe: a pedal that dies (battery, range, crash) while held down
+        // would otherwise leave X-ray latched on with no way to clear it.
         for pedal in Pedal.allCases {
             if pedalConnected[pedal] == true,
                let seen = lastPedalSeen[pedal], now.timeIntervalSince(seen) > pedalStaleAfter {
                 pedalConnected[pedal] = false
-                log("\(pedal.rawValue) not heard for \(Int(pedalStaleAfter))s — marking offline")
+                lastPedalCount[pedal] = nil
+                log("\(pedal.rawValue) not heard for \(pedalStaleAfter)s — marking offline")
+                if pedal == .leftFoot && pedalHeld {
+                    pedalHeld = false
+                    refreshXray()
+                    log("Left pedal lost while held — X-ray OFF (fail-safe)")
+                }
+                if pedal == .dsaFoot {
+                    if dsaActive {
+                        dsaActive = false
+                        refreshXray()
+                        log("DSA pedal lost mid-run — run ENDED, X-ray OFF (fail-safe)")
+                    }
+                    dsaFault = false   // can't know the wiring of a pedal we can't hear
+                }
             }
         }
 

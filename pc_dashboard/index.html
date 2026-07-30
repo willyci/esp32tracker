@@ -73,8 +73,11 @@
   .sp-cur   { background: #f97316; }   /* current finger position */
 
   /* ---- foot pedals + X-ray screen capture ---- */
-  #pedals { display: flex; align-items: center; gap: 10px; margin: 0 0 18px; }
+  #pedals { display: flex; align-items: center; gap: 10px; margin: 0 0 18px; flex-wrap: wrap; }
   .pedal-lbl { font-size: 13px; color: #9aa0a8; }
+  /* DSA run in progress — live acquisition, so it reads as an alert, not a status. */
+  .badge.dsa-live { background: #7c2d12; color: #fdba74; }
+  .badge.fault    { background: #7f1d1d; color: #fca5a5; }
   #capture-flash { position: fixed; inset: 0; background: #fff; opacity: 0;
                    pointer-events: none; z-index: 10; }
   #capture-flash.fire { animation: capflash .35s ease-out; }
@@ -106,7 +109,12 @@
                border: 1px solid #2a2e36; border-radius: 10px; overflow: hidden; }
   .sim-vessel { position: absolute; top: 50%; height: 30px; margin-top: -15px;
                 background: rgba(140,148,160,.16); border: 1px solid rgba(140,148,160,.25);
-                border-radius: 15px; }
+                border-radius: 15px;
+                transition: background .35s ease-out, border-color .35s ease-out; }
+  /* DSA contrast run: injected iodine reads DARK on a subtracted angiogram, so the vessel
+     fills in rather than lighting up. The transition makes the fill visibly flow. */
+  .sim-vessel.contrast { background: rgba(12,14,17,.94); border-color: rgba(120,130,145,.55);
+                         box-shadow: inset 0 0 14px 3px rgba(0,0,0,.55); }
   .sim-hub { position: absolute; top: 50%; width: 10px; height: 40px; margin-top: -20px;
              background: #3a3f49; border-radius: 3px; }
   .sim-rod { position: absolute; top: 50%; border-radius: 8px;
@@ -145,6 +153,8 @@
     <span class="badge" id="badge-left-foot">L (X-ray): Scanning…</span>
     <span class="badge" id="badge-right-foot">R (capture): Scanning…</span>
     <span class="badge" id="capture-badge">captures: 0</span>
+    <span class="badge" id="badge-dsa-foot">DSA: Scanning…</span>
+    <span class="badge" id="dsa-runs-badge">runs: 0</span>
   </div>
   <div id="capture-flash"></div>
 
@@ -444,14 +454,36 @@ function render() {
   xrayBanner.textContent = "X-RAY: " + (xray ? "ON" : "OFF");
   xrayBanner.className = xray ? "xray-on" : "xray-off";
 
-  // Foot pedals: connection badges + the RIGHT pedal's capture counter with a flash.
+  // Foot pedals: status badges + the RIGHT pedal's capture counter with a flash. Pedals
+  // are broadcast-only, so "Detected" means we're hearing its advertisements — there is no
+  // connection. The LEFT pedal is a dead-man switch, so it shows HELD while the foot is down.
   for (const foot of ["left-foot", "right-foot"]) {
     const badge = document.getElementById(`badge-${foot}`);
-    const connected = !!latest[foot]?.connected;
-    badge.textContent = (foot === "left-foot" ? "L (X-ray): " : "R (capture): ")
-                      + (connected ? "Connected" : "Scanning…");
-    badge.classList.toggle("connected", connected);
+    const seen = !!latest[foot]?.connected;
+    let text;
+    if (foot === "left-foot")
+      text = "L (X-ray): " + (!seen ? "Scanning…"
+                            : latest.pedalHeld ? "HELD — X-RAY ON" : "Detected");
+    else
+      text = "R (capture): " + (seen ? "Detected" : "Scanning…");
+    badge.textContent = text;
+    badge.classList.toggle("connected", seen);
   }
+  // DSA pedal: live contrast run. Its badge doubles as the switch's self-check readout —
+  // the COM/NO/NC wiring lets the firmware detect an unplugged or miswired switch.
+  const dsaBadge = document.getElementById("badge-dsa-foot");
+  const dsaSeen = !!latest["dsa-foot"]?.connected;
+  const dsaLive = !!latest.dsaActive;
+  dsaBadge.textContent = "DSA: " + (!dsaSeen ? "Scanning…"
+                                  : latest.dsaFault ? "SWITCH FAULT"
+                                  : dsaLive ? "RUN — CONTRAST" : "Detected");
+  dsaBadge.classList.toggle("connected", dsaSeen && !dsaLive && !latest.dsaFault);
+  dsaBadge.classList.toggle("dsa-live", dsaLive && !latest.dsaFault);
+  dsaBadge.classList.toggle("fault", dsaSeen && !!latest.dsaFault);
+  document.getElementById("dsa-runs-badge").textContent = `runs: ${latest.dsaRuns ?? 0}`;
+  // Contrast fills the vessel for as long as the run lasts.
+  document.getElementById("sim-vessel").classList.toggle("contrast", dsaLive);
+
   const captures = latest.captureCount ?? 0;
   document.getElementById("capture-badge").textContent = `captures: ${captures}`;
   if (seenCaptures !== null && captures > seenCaptures) {

@@ -98,18 +98,62 @@ tune and verify the glove interaction before a headset session:
 If twist runs the wrong way or is too sensitive, tune `SIM.twistAxis` / `SIM.stripFullTurns`
 in `index.html` — then apply the same values to `SimulationModel.swift` (they must match).
 
-### 9. Foot pedals
+### 9. Foot pedals (broadcast, never connected)
 Power on the ESP32-S3 SuperMini pedals (`../firmware/left-foot/`, `../firmware/right-foot/`) —
-their badges under the X-ray banner flip to green **Connected** just like the hand cards.
+their badges under the X-ray banner turn green **Detected** within a second or two.
 
-- **Left pedal** (X-ray): each stomp toggles the shared X-RAY banner — same effect as the
-  hand trackers' GPIO6/7 button, and it also drives the catheter transparency in the
-  simulation panel.
+Pedals are **connectionless**: they advertise `[0xFF,0xFF, pressCount, held]` in manufacturer
+data and the dashboard reads it straight from a continuous scan. (Vision Pro runs out of BLE
+connection slots with two hands already connected — `CBError 11` — so pedals must never take
+one. The PC dashboard follows the same design so both consumers behave identically.)
+"Detected" therefore means *we can hear it advertising*, not that a link is open.
+
+- **Left pedal** (X-ray): **hold-to-activate**, like a real fluoro pedal — X-RAY is on while
+  your foot is down and off the instant you lift it (badge reads *HELD — X-RAY ON*). It is
+  NOT a toggle. It also drives the catheter transparency in the simulation panel. The hand
+  buttons still *latch* X-ray independently; effective state is `latched OR pedal-held`, so
+  releasing the pedal returns to whatever the buttons had set.
 - **Right pedal** (capture): each stomp increments the **captures** counter and fires a
   brief white full-screen flash (fluoro-shot style). The dashboard only counts and flashes —
-  what a "capture" saves is up to each consumer (the visionOS app will define its own action).
+  what a "capture" saves is up to each consumer (the visionOS app defines its own action).
 
-All devices are independent BLE connections; any subset may be on at a time.
+**Fail-safe:** because the left pedal is a *level*, silence must not leave X-ray stuck on. If
+no advertisement arrives for 1.5 s (battery died, walked out of range, board crashed) the
+dashboard treats the pedal as released and turns X-ray off. Brief RF gaps are absorbed —
+the pedal advertises every ~100–150 ms, so 1.5 s is roughly ten missed ads.
+
+Any subset of devices may be on at a time; the two hands use connections, the pedals don't.
+
+### 9b. DSA pedal (pedal 3 — contrast run)
+`../firmware/dsa-foot/` — the DSA (digital subtraction angiography) run: the images taken once
+the catheter is in position and X-ray dye is being injected, so the vessels fill.
+
+- **Hold = run.** While the pedal is down the **DSA** badge reads *RUN — CONTRAST* in amber,
+  the **runs** counter increments once per run, and the simulation panel's vessel **fills
+  dark** — injected iodine reads dark on a subtracted angiogram, so it fills in rather than
+  lighting up. Release ends the run and the vessel clears.
+- **A DSA run implies X-ray.** A run *is* an X-ray acquisition, so the X-RAY banner comes on
+  for its duration (effective state is `latched OR fluoro-pedal-held OR dsa-active`). It does
+  not disturb the hand buttons' latch — ending a run returns to whatever they had set.
+- Works with a momentary pedal or a maintained (latching) toggle: the broadcast is a level
+  that mirrors the switch position either way.
+
+**3-wire wiring (COM/NO/NC) — and why it's better than the other two pedals:**
+
+| Switch terminal | Pin | Reads |
+|---|---|---|
+| COM | GPIO12 | driven LOW — the switch's common ground |
+| NO  | GPIO10 | LOW when **pressed** |
+| NC  | GPIO8  | LOW when **at rest** |
+
+Because both contacts are read and they are complementary, the firmware can tell pressed from
+released *from a broken connection*: both open = unplugged / broken wire / switch failed open;
+both closed = miswired or NO-NC short. Either fault reports "not running" (never start a run on
+a suspect switch) and shows **DSA: SWITCH FAULT** in red on the dashboard and in the headset.
+A plain 2-wire button cannot distinguish "not pressed" from "not connected" at all.
+
+Same 1.5 s fail-safe as the fluoro pedal: if a pedal dies mid-run, the run ends and X-ray goes
+off rather than latching on forever.
 
 ### 10. Mini trackers
 The ESP32-C3 0.42"-OLED glove units (`../firmware/left-mini/`, `../firmware/right-mini/` —

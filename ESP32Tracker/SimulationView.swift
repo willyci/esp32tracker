@@ -49,6 +49,11 @@ struct SimulationView: View {
                 w.position.x = Self.wireLength / 2 - sim.wire.insertion
                 w.orientation = simd_quatf(angle: sim.wire.twist, axis: [1, 0, 0])
             }
+            // DSA run: contrast fills the vessel for as long as the pedal is down.
+            if let v = root.findEntity(named: "vessel") as? ModelEntity {
+                v.model?.materials = [SimpleMaterial(color: Self.vesselColor(contrast: ble.dsaActive),
+                                                     isMetallic: false)]
+            }
         } attachments: {
             Attachment(id: "deviceStatus") {
                 deviceStatusPanel
@@ -57,13 +62,21 @@ struct SimulationView: View {
         .task { await trackHands() }
     }
 
-    /// Connection dots for all four boards (green = connected, red = not).
+    /// Connection dots for every board — two connected hands plus each broadcast pedal
+    /// (green = connected/heard, red = not), and a live DSA-run indicator.
     private var deviceStatusPanel: some View {
         HStack(spacing: 18) {
             statusDot("L hand", ble.left.connection == .connected)
             statusDot("R hand", ble.right.connection == .connected)
             ForEach(Pedal.allCases, id: \.self) { pedal in
                 statusDot(pedal.label, ble.isConnected(pedal))
+            }
+            if ble.dsaFault {
+                Label("DSA switch", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+            } else if ble.dsaActive {
+                Label("DSA RUN", systemImage: "waveform.path.ecg")
+                    .foregroundStyle(.orange)
             }
         }
         .font(.callout)
@@ -127,16 +140,24 @@ struct SimulationView: View {
         return container
     }
 
-    /// Translucent "vessel" the tools advance into (entry at x = 0, running −X).
+    /// Translucent "vessel" the tools advance into (entry at x = 0, running −X). Named so
+    /// the update closure can swap its material when a DSA contrast run is running.
     private static func makeVessel() -> Entity {
         let vessel = ModelEntity(
             mesh: .generateCylinder(height: 0.7, radius: 0.018),
-            materials: [SimpleMaterial(color: UIColor.systemGray.withAlphaComponent(0.25),
-                                       isMetallic: false)]
+            materials: [SimpleMaterial(color: vesselColor(contrast: false), isMetallic: false)]
         )
+        vessel.name = "vessel"
         vessel.orientation = simd_quatf(angle: -.pi / 2, axis: [0, 0, 1])
         vessel.position = [-0.35, 0, 0]
         return vessel
+    }
+
+    /// Empty vessel = faint grey outline. During a DSA run the injected contrast fills it
+    /// and reads DARK and opaque, the way iodine does on a subtracted angiogram.
+    private static func vesselColor(contrast: Bool) -> UIColor {
+        contrast ? UIColor.black.withAlphaComponent(0.92)
+                 : UIColor.systemGray.withAlphaComponent(0.25)
     }
 
     /// Entry-point marker the rods slide through.
