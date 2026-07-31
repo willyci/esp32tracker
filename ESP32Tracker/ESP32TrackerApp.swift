@@ -4,17 +4,26 @@ import SwiftUI
 struct ESP32TrackerApp: App {
     @StateObject private var ble: BLEManager
     @StateObject private var sim: SimulationModel
+    @StateObject private var captures: CaptureStore
 
     init() {
         let ble = BLEManager()
         let sim = SimulationModel(ble: ble)
-        // Right foot pedal (or the UI's capture button) → freeze the sim state.
+        let captures = CaptureStore()
+        // Right foot pedal (or the UI's capture button) → freeze the sim state and shoot
+        // BOTH photos: the X-ray monitor image and the 180° room view.
         ble.onXrayCapture = { [weak ble] in
             guard let ble else { return }
             sim.recordSnapshot(xrayOn: ble.xrayOn)
+            captures.capture(sim.captureScene(index: ble.captureCount,
+                                              xrayOn: ble.xrayOn,
+                                              dsaActive: ble.dsaActive,
+                                              dsaRuns: ble.dsaRuns),
+                             log: { [weak ble] msg in ble?.log(msg) })
         }
         _ble = StateObject(wrappedValue: ble)
         _sim = StateObject(wrappedValue: sim)
+        _captures = StateObject(wrappedValue: captures)
     }
 
     var body: some Scene {
@@ -22,6 +31,7 @@ struct ESP32TrackerApp: App {
             ContentView()
                 .environmentObject(ble)
                 .environmentObject(sim)
+                .environmentObject(captures)
         }
         // A plain (flat) window is the initial scene. A volumetric WindowGroup as the
         // *only* scene crashes at launch ("no scenes ... match this role"), because the

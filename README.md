@@ -181,21 +181,34 @@ dashboard implement this identically — change one, change the other.
 
 Pull first — the Windows side pushes firmware and dashboard work, the Mac side pushes the app.
 
-**Unverified Swift.** These were written on Windows and have **never seen a compiler**, so expect to
-fix small things:
+**Swift now compiles.** The Windows-written files were built for visionOS on the Mac and needed no
+fixes: pedal levels (hold-to-activate), the `.dsaFoot` case, derived `xrayOn`, the two-stage silence
+timeouts, the DSA run/fault readout, and the contrast-fill vessel all came up clean.
 
-- `ESP32Tracker/BLEManager.swift` — pedal levels (hold-to-activate), `.dsaFoot` case, derived
-  `xrayOn`, two-stage silence timeouts
-- `ESP32Tracker/ContentView.swift` — DSA run/fault readout
-- `ESP32Tracker/SimulationView.swift` — named vessel entity + contrast fill during a DSA run
+**Mini tracker support added on the Mac.** `Hand.from(advertisedName:)` now matches
+`Left/Right Mini Tracker` as well, so a Mini fills a hand slot in the headset exactly as it does on
+the dashboard, and `Hand.isMini` flags it. `TrackerState` reads a Mini's byte 28 as the
+capture-toggle bit (baselining the first packet so connecting mid-press can't fire a phantom
+capture) and reports calibration as 0, matching `tracker_dashboard.on_packet`.
+
+**Capture now shoots a pair.** One press of the capture pedal (or a Mini's capture button) freezes
+the sim state and renders **two** photos into `Documents/Captures/`, thumbnails of both showing in the
+window:
+
+1. **X-ray monitor** — the fluoro image: dark field, vessel across it, catheter and guidewire as
+   radiopaque lines at their live depths, contrast-filled during a DSA run, with burned-in corner
+   annotations (FLUORO/DSA, image number, depths).
+2. **180° room view** — the wide shot of the suite: circular fisheye frame with table, patient, C-arm,
+   ceiling monitor (lit when imaging) and the tools in hand.
+
+> The room view renders the **simulated** suite, not the physical room. visionOS only exposes the
+> passthrough cameras under Apple's *Enterprise* "Main Camera Access" entitlement
+> (`com.apple.developer.arkit.main-camera-access.allow`), which this app doesn't hold — so no
+> non-enterprise app can photograph the real room. Add the entitlement and `RoomView180` is the place
+> to swap in a real frame.
 
 **Known gaps on the app side:**
 
-- The app doesn't recognise the **Mini tracker** names yet (`Hand.from(advertisedName:)` only matches
-  `Left/Right Hand Tracker`), so a Mini board won't fill a hand slot in the headset. The dashboard
-  already accepts either name.
-- **What a "capture" actually does** is still undefined beyond incrementing a counter and recording a
-  sim snapshot. The right pedal and Mini capture button both fire it.
 - `onDSARunStart` is a hook with no consumer — the natural home for recording/playing back a run.
 
 **Tuning worth revisiting on device:** the pedal silence windows (`levelReleaseAfter` = 4 s,

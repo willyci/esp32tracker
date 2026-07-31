@@ -128,6 +128,9 @@ final class BLEManager: NSObject, ObservableObject {
         super.init()
         left.onXrayToggle  = { [weak self] in self?.toggleXray() }
         right.onXrayToggle = { [weak self] in self?.toggleXray() }
+        // Mini trackers fire a capture from their button (via the repurposed calib byte).
+        left.onCapture  = { [weak self] in self?.captureXray() }
+        right.onCapture = { [weak self] in self?.captureXray() }
         central = CBCentralManager(delegate: self, queue: nil)
         // 0.5 s, not 3 s: this tick also enforces the left pedal's dead-man fail-safe, so a
         // slow tick would let X-ray linger seconds after a held pedal dropped out. The work
@@ -389,14 +392,16 @@ extension BLEManager: CBCentralManagerDelegate {
             return
         }
 
-        // Hands: connect (queued, one at a time).
+        // Hands: connect (queued, one at a time). Accepts a full tracker OR a Mini.
         guard let hand = Hand.from(advertisedName: advName) else { return }
         guard peripherals[hand] == nil else { return }
+        let mini = Hand.isMini(advertisedName: advName)
+        state(for: hand).isMini = mini
         peripherals[hand] = peripheral
         handFor[peripheral.identifier] = hand
         peripheral.delegate = self
         state(for: hand).setConnection(.connecting)
-        log("found \(hand.rawValue) (\(RSSI) dBm) — queued")
+        log("found \(advName ?? hand.rawValue) (\(RSSI) dBm)\(mini ? " [mini]" : "") — queued")
         enqueueConnect(peripheral)
     }
 
