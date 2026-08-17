@@ -35,9 +35,9 @@ CHAR_UUID    = "4f7a0002-9b3e-4c2a-8d1f-0a1b2c3d4e5f"
 # firmware and arrive in the BLE scan response (they don't fit the main advertising packet
 # next to the 128-bit UUID). All boards speak the same 32-byte packet.
 #
-# "Mini Tracker" = the ESP32-C3 0.42"-OLED glove unit (SoftPot + 2 buttons, NO IMU). It is
-# a drop-in alternative for a hand slot: quaternion stays identity, and its second button
-# reports X-ray captures by flipping byte 28 (the calib slot, meaningless without an IMU).
+# "Mini Tracker" = the ESP32-C3 0.42"-OLED glove unit (MPU-6050 + SoftPot + 2 buttons). It is
+# a drop-in alternative for a hand slot, and its second button reports X-ray captures by
+# flipping byte 28 (the calib slot — a Mini has no BNO-style calibration status to put there).
 DEVICE_ALIASES = {   # CONNECTED devices (hand slots) — these run a GATT server
     "left":       ("Left Hand Tracker",  "Left Mini Tracker"),
     "right":      ("Right Hand Tracker", "Right Mini Tracker"),
@@ -108,8 +108,9 @@ def on_packet(dev: str, data: bytearray, mini: bool = False) -> None:
     if len(data) < PACKET.size:
         return
     w, x, y, z, ax, ay, az, calib, tStart, tCur, xrayBit = PACKET.unpack(bytes(data[:PACKET.size]))
-    # Mini trackers have no IMU and repurpose the calib byte as a capture-toggle bit.
-    # (Real trackers' calib legitimately changes 0-3, so this ONLY applies to minis.)
+    # Mini trackers repurpose the calib byte as a capture-toggle bit (their MPU-6050 has no
+    # BNO-style calibration status). A BNO085 tracker's calib legitimately changes 0-3, so
+    # this ONLY applies to minis.
     if mini:
         if calib != last_capture_bit[dev]:
             last_capture_bit[dev] = calib

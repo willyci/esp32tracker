@@ -73,13 +73,13 @@ both**.
 | Board | Sketch | BLE name | Role |
 |---|---|---|---|
 | Hand tracker ×2 | [`left/`](firmware/left/) · [`right/`](firmware/right/) | `Left/Right Hand Tracker` | IMU orientation + SoftPot (connected) |
-| Mini tracker ×2 | [`left-mini/`](firmware/left-mini/) · [`right-mini/`](firmware/right-mini/) | `Left/Right Mini Tracker` | no IMU: SoftPot + 2 buttons + onboard OLED (connected) |
+| Mini tracker ×2 | [`left-mini/`](firmware/left-mini/) · [`right-mini/`](firmware/right-mini/) | `Left/Right Mini Tracker` | MPU-6050 + SoftPot + 2 buttons + onboard OLED (connected) |
 | Fluoro pedal | [`left-foot/`](firmware/left-foot/) | `Left Foot Pedal` | **hold** = X-ray on (broadcast) |
 | Capture pedal | [`right-foot/`](firmware/right-foot/) | `Right Foot Pedal` | press = one X-ray capture (broadcast) |
 | DSA pedal | [`dsa-foot/`](firmware/dsa-foot/) | `DSA Foot Pedal` | **hold** = contrast run (broadcast) |
 
 A Mini tracker is a drop-in alternative for a hand slot — the dashboard and app accept either name
-for the same hand. Its quaternion stays identity (orientation comes from ARKit hand tracking).
+for the same hand, over the identical 32-byte packet.
 
 ## Hardware
 
@@ -100,15 +100,29 @@ and flashing steps are in [`firmware/README.md`](firmware/README.md).
 
 ### Mini trackers (ESP32-C3 with 0.42" OLED)
 
-A simpler glove unit with **no IMU** — for when orientation comes from ARKit hand tracking and you
-only need the touch/button inputs. Status shows on the board's own 72×40 OLED.
+A cheaper glove unit: an **MPU-6050** in place of the BNO085, plus the SoftPot and both buttons,
+with status on the board's own 72×40 OLED.
 
 | Function | Pins | Notes |
 |---|---|---|
+| MPU-6050 | GPIO5 SDA / GPIO6 SCL | **shares the OLED's I2C bus** (OLED `0x3C`, IMU `0x68`) — costs no pins. **VCC → 3V3, never 5V** |
 | SoftPot wiper | GPIO0 | ADC; internal pulldown enabled, so no external resistor |
 | X-ray button | GPIO8 (sense) ↔ GPIO7 (gnd) | GPIO8 is strapping, so it **must** be the pull-up sense pin |
 | Capture button | GPIO3 ↔ GPIO4 | |
 | Onboard OLED | GPIO5 / GPIO6 | hardware I2C, already wired on the board |
+
+The GY-521's pull-ups tie SDA/SCL to VCC, so powering it from 5 V would put 5 V on the C3's
+3.3 V-only GPIOs — use 3V3. Leave AD0, INT, XDA and XCL unconnected (XDA/XCL are the MPU's
+*auxiliary master* port for attaching a magnetometer, not a second host interface).
+
+**The MPU-6050 does no fusion of its own**, unlike the BNO085 — so the sketch integrates the gyro
+to produce the quaternion. Rotation tracks well moment-to-moment, but with no magnetometer there is
+no absolute reference and orientation drifts on all three axes. Two things keep it usable: a
+gyro-bias calibration at boot (**hold the board still for ~1.5 s after power-up**) and a deadband
+that stops a still board creeping — in simulation, 60 s of typical residual bias drifts 46° without
+the deadband and 0° with it. Expect slow drift over minutes regardless, worse as the board warms,
+and re-center in the app. `USE_ACCEL_TILT` in the sketch turns on gravity correction for roll/pitch
+if that isn't good enough; yaw needs a magnetometer.
 
 C3 pin constraints that shaped this: ADC exists only on GPIO0–4, GPIO2 is strapping (a floating
 SoftPot wiper there can stop the boot), GPIO9 is the BOOT button. **The SoftPot's centre pin is the
@@ -222,6 +236,8 @@ tightened — which shortens how long a dead pedal takes to release X-ray.
   sending ~7–10 ads/s was delivered at ~1–3/s with gaps to ~3 s, because the host OS aggregates
   repeat advertisements. WinRT's `SignalStrengthFilter` sampling interval makes it *worse*, not
   better. Measure, don't assume.
-- The Mini trackers repurpose the packet's `calib` byte (meaningless with no IMU) as a
-  capture-toggle bit. This applies to Mini boards only — a real tracker's `calib` legitimately
-  changes 0–3.
+- The Mini trackers repurpose the packet's `calib` byte as a capture-toggle bit. This applies to
+  Mini boards only — a BNO085 tracker's `calib` legitimately changes 0–3. **Byte 28 is therefore
+  not available for IMU status on a Mini**, even now that it has an MPU-6050; its gyro-calibration
+  state is shown on the OLED and serial instead, which is why adding the IMU needed no protocol,
+  dashboard or app changes at all.

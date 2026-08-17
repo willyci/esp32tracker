@@ -1,11 +1,29 @@
-// ESP32-C3 0.42" OLED board → BLE "Mini" hand tracker (no IMU, no external screen).
+// ESP32-C3 0.42" OLED board + MPU-6050 → BLE "Mini" hand tracker (no external screen).
 //
-// A simplified glove unit: SoftPot touch strip (grab/twist) + TWO buttons (X-ray on/off,
-// X-ray screen capture), with status on the board's own 72x40 OLED. No BNO085 — the
-// quaternion in the packet stays identity; orientation comes from the headset's own
-// hand tracking. Two boards from the SAME sketch — only IS_LEFT_HAND differs.
+// A compact glove unit: MPU-6050 orientation + SoftPot touch strip (grab/twist) + TWO
+// buttons (X-ray on/off, X-ray screen capture), with status on the board's own 72x40 OLED.
+// Two boards from the SAME sketch — only IS_LEFT_HAND differs.
+//
+// IMU NOTE — the MPU-6050 is 6-DOF (gyro + accel) with NO magnetometer, and unlike the
+// BNO085 on the big trackers it does NO fusion of its own. So this sketch integrates the
+// GYRO to produce the quaternion. What that means in practice:
+//   * Rotation tracks well moment-to-moment — this is what makes the cube move.
+//   * There is no absolute reference, so orientation DRIFTS on all three axes. Two things
+//     keep it small: a gyro-bias calibration at boot, and a deadband that stops a still
+//     board from creeping. Expect slow drift over minutes anyway — re-center in the app.
+//   * Drift gets worse as the board warms (gyro bias is temperature-dependent), and these
+//     boards do run warm. Re-power occasionally to re-calibrate if it gets annoying.
+//   * HOLD THE BOARD STILL for ~1.5 s after power-up — that IS the bias calibration.
+//   * Accelerometer is read too (same I2C transaction, free) and reported in the packet
+//     for the dashboard's readouts, but it does NOT correct orientation by default. Set
+//     USE_ACCEL_TILT to 1 below to have gravity pull roll/pitch straight; yaw is beyond
+//     help without a magnetometer.
 //
 // Pins (this is the C3 board with the 0.42" OLED, ceramic antenna, Type-C):
+//   MPU-6050  VCC→3V3  GND→GND  SDA→GPIO5  SCL→GPIO6  (addr 0x68; AD0/INT/XDA/XCL unused)
+//             It SHARES the onboard OLED's I2C bus — different addresses (OLED 0x3C), so
+//             this costs no extra pins. VCC must be 3V3, NOT 5V: the GY-521's pull-ups tie
+//             SDA/SCL to VCC, and 5V on those lines would exceed the C3's 3.3V GPIOs.
 //   SoftPot   V+→3V3  GND→GND  wiper→GPIO0 (ADC). Internal pulldown is enabled so no
 //             external resistor is needed; if "no touch" readings jitter, add the same
 //             100k wiper→GND the big trackers use.
@@ -15,21 +33,25 @@
 //                  driven until firmware runs, so even holding the button at power-up is safe).
 //                  Do NOT swap the two, or a floating GPIO8 can stop the board booting.
 //   Capture button across GPIO3 & GPIO4 — GPIO4 driven LOW as the button's ground.
-//   Onboard OLED   72x40 SSD1306, hardware I2C SDA=GPIO5 SCL=GPIO6 (fine here — the old
-//                  U8g2-vs-BNO hardware-I2C conflict only existed because of the BNO).
+//   Onboard OLED   72x40 SSD1306, hardware I2C SDA=GPIO5 SCL=GPIO6 — shared with the IMU.
 //   DO NOT USE: GPIO2 (strapping — a floating wiper/ground here can stop the boot),
-//               GPIO9 (onboard BOOT button), GPIO5/6 (the OLED). GPIO8 is a strapping pin
-//               too, but is used SAFELY as the X-ray sense pin (see above). RX/TX are free.
+//               GPIO9 (onboard BOOT button). GPIO8 is a strapping pin too, but is used
+//               SAFELY as the X-ray sense pin (see above). GPIO1/10/RX/TX are free.
 //   Power: battery + → 5V pin, battery − → GND. NEVER battery on 5V while USB is plugged in.
 //
-// Packet: same 32 bytes as every other board. Byte 31 flips on each X-ray button press
-// (= toggle shared X-ray). The CAPTURE button flips byte 28 — the calib slot, meaningless
-// without an IMU — and the dashboard fires one screen capture per flip.
+// Packet: same 32 bytes as every other board, UNCHANGED by adding the IMU. Byte 31 flips on
+// each X-ray button press (= toggle shared X-ray). The CAPTURE button flips byte 28 — the
+// calib slot — and the dashboard fires one screen capture per flip. NOTE that byte 28 is
+// therefore NOT available for IMU calibration status on Mini boards; gyro-cal state is shown
+// on the OLED and serial instead. Do not repurpose it.
 //
 // Libraries: NimBLE-Arduino 1.4.x (not 2.x), U8g2 (needs a version with the 72X40_ER
-// constructor, v2.34+ — update U8g2 if the constructor is not found).
+// constructor, v2.34+ — update U8g2 if the constructor is not found), Adafruit MPU6050
+// (which pulls in Adafruit Unified Sensor).
 // Board: "ESP32C3 Dev Module", core 2.0.17, USB CDC On Boot: Enabled, 115200 baud.
 
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
 #include <NimBLEDevice.h>
 #include <U8g2lib.h>
 #include "driver/gpio.h"   // gpio_pulldown_en — keeps the SoftPot pin from floating
@@ -62,9 +84,10 @@ static constexpr int SOFTPOT_NOTOUCH_RAW = 80;   // raw ADC below this = no touc
 
 // ---- Same 32-byte wire format as every other board (see ../../SPEC.md) ----
 struct __attribute__((packed)) OrientationPacket {
-  float   w, x, y, z;     // identity quaternion (no IMU on this board)
-  float   ax, ay, az;     // 0
-  uint8_t calib;          // REPURPOSED on Mini boards: capture bit, flips per capture press
+  float   w, x, y, z;     // orientation, integrated from the gyro (see IMU NOTE)
+  float   ax, ay, az;     // accel, m/s^2 — reported for the dashboard readouts
+  uint8_t calib;          // REPURPOSED on Mini boards: capture bit, flips per capture press.
+                          // NOT IMU calibration status — see the header note.
   uint8_t touchStart;     // SoftPot position where the touch began (0 = no touch)
   uint8_t touchCurrent;   // current SoftPot position while touched (0 = no touch)
   uint8_t xrayOn;         // flips 0/1 on each X-ray button press
@@ -73,9 +96,38 @@ static_assert(sizeof(OrientationPacket) == 32, "packet must be 32 bytes");
 
 static OrientationPacket pkt = { 1, 0, 0, 0,  0, 0, 0,  0, 0, 0, 0 };
 
-// Onboard 72x40 OLED, hardware I2C on its dedicated pins.
+// Onboard 72x40 OLED, hardware I2C — SHARED with the MPU-6050 (different addresses).
 U8G2_SSD1306_72X40_ER_F_HW_I2C display(U8G2_R0, /*reset=*/U8X8_PIN_NONE,
                                        /*clock=*/PIN_OLED_SCL, /*data=*/PIN_OLED_SDA);
+
+// ---- IMU ----
+static constexpr uint8_t MPU_ADDR = 0x68;   // AD0 low; 0x69 if AD0 is tied high
+Adafruit_MPU6050 mpu;
+static bool imuOK = false;                  // false = run without orientation, don't halt
+
+// Integrate on a FIXED cadence so dt is a known constant rather than whatever the loop
+// happened to take. The loop spins faster than this and gates on millis().
+static constexpr uint32_t IMU_HZ          = 100;
+static constexpr uint32_t IMU_INTERVAL_MS = 1000 / IMU_HZ;
+static constexpr float    IMU_DT          = 1.0f / (float)IMU_HZ;
+static uint32_t lastImuMs = 0;
+
+// Averaged at boot while the board is held still, then subtracted from every reading.
+// Without this an MPU-6050 can sit at whole degrees per second and visibly spin the cube.
+static float gyroBias[3] = { 0, 0, 0 };
+
+// Residual bias still creeps after calibration, which would slowly rotate the cube on its
+// own. Below this rate we call it "not moving" and zero it. Deliberate hand rotation is
+// orders of magnitude faster, so this costs nothing real.
+static constexpr float GYRO_DEADBAND_RADS = 0.012f;   // ~0.7 deg/s
+
+// Optional gravity correction for roll/pitch. OFF by default: the requirement here is
+// "gyro, to see the cube rotate". Set to 1 if drift becomes annoying in use — it bounds
+// roll and pitch, but yaw is unfixable without a magnetometer.
+#define USE_ACCEL_TILT 0
+#if USE_ACCEL_TILT
+static constexpr float TILT_GAIN = 0.02f;   // per step; higher = firmer, more accel noise
+#endif
 
 NimBLECharacteristic* orientationChar = nullptr;
 volatile bool deviceConnected = false;
@@ -144,6 +196,96 @@ void setupBLE() {
   adv->setScanResponseData(scanData);
   adv->start();
   Serial.println("[BLE] advertising as " DEVICE_NAME);
+}
+
+// Log every device answering on the shared I2C bus. Expect BOTH 0x3C (OLED) and 0x68
+// (MPU-6050) — this is the wiring check after adding the IMU.
+void i2cScan() {
+  Serial.println("[I2C] scanning bus...");
+  uint8_t found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      const char* who = (addr == MPU_ADDR) ? "  <- MPU-6050"
+                      : (addr == 0x3C)     ? "  <- OLED" : "";
+      Serial.printf("[I2C]   device at 0x%02X%s\n", addr, who);
+      found++;
+    }
+  }
+  if (found == 0)
+    Serial.println("[I2C]   NONE found — check SDA/SCL/3V3/GND wiring");
+}
+
+// Average the gyro while the board sits still; that average IS the bias. This is the
+// single biggest lever on drift, which is why the board must be left alone here.
+void calibrateGyro() {
+  Serial.println("[IMU] calibrating gyro bias — HOLD STILL...");
+  display.clearBuffer();
+  display.setFont(u8g2_font_6x10_tr);
+  display.drawStr(0, 14, "HOLD");
+  display.drawStr(0, 26, "STILL...");
+  display.sendBuffer();
+
+  const int samples = 300;                 // ~1.5 s at 5 ms/sample
+  double sum[3] = { 0, 0, 0 };
+  for (int i = 0; i < samples; i++) {
+    sensors_event_t a, g, t;
+    mpu.getEvent(&a, &g, &t);
+    sum[0] += g.gyro.x; sum[1] += g.gyro.y; sum[2] += g.gyro.z;
+    delay(5);
+  }
+  for (int i = 0; i < 3; i++) gyroBias[i] = (float)(sum[i] / samples);
+  Serial.printf("[IMU] gyro bias (rad/s): %+.4f %+.4f %+.4f\n",
+                gyroBias[0], gyroBias[1], gyroBias[2]);
+}
+
+// One integration step. Quaternion q is updated by the small rotation the gyro measured
+// over IMU_DT: q += 0.5 * q * omega * dt, then renormalized. Accel is copied through for
+// the dashboard's readouts (it does not steer orientation unless USE_ACCEL_TILT).
+void updateIMU() {
+  sensors_event_t a, g, t;
+  mpu.getEvent(&a, &g, &t);
+
+  float gx = g.gyro.x - gyroBias[0];       // rad/s
+  float gy = g.gyro.y - gyroBias[1];
+  float gz = g.gyro.z - gyroBias[2];
+  if (fabsf(gx) < GYRO_DEADBAND_RADS) gx = 0;
+  if (fabsf(gy) < GYRO_DEADBAND_RADS) gy = 0;
+  if (fabsf(gz) < GYRO_DEADBAND_RADS) gz = 0;
+
+  float qw = pkt.w, qx = pkt.x, qy = pkt.y, qz = pkt.z;
+  const float h = 0.5f * IMU_DT;
+  float nw = qw + (-qx * gx - qy * gy - qz * gz) * h;
+  float nx = qx + ( qw * gx + qy * gz - qz * gy) * h;
+  float ny = qy + ( qw * gy - qx * gz + qz * gx) * h;
+  float nz = qz + ( qw * gz + qx * gy - qy * gx) * h;
+
+#if USE_ACCEL_TILT
+  // Nudge the estimate so the measured gravity direction lines up with the quaternion's
+  // idea of "down". Only affects roll/pitch — rotation about gravity is invisible to an
+  // accelerometer, so yaw is untouched.
+  float amag = sqrtf(a.acceleration.x * a.acceleration.x +
+                     a.acceleration.y * a.acceleration.y +
+                     a.acceleration.z * a.acceleration.z);
+  if (amag > 6.0f && amag < 13.0f) {       // only when close to 1 g (not being shaken)
+    float axn = a.acceleration.x / amag, ayn = a.acceleration.y / amag, azn = a.acceleration.z / amag;
+    // Gravity as the current quaternion predicts it (third row of the rotation matrix).
+    float vx = 2.0f * (nx * nz - nw * ny);
+    float vy = 2.0f * (nw * nx + ny * nz);
+    float vz = nw * nw - nx * nx - ny * ny + nz * nz;
+    // Error = measured x predicted; feed it back as a small extra rotation.
+    float ex = ayn * vz - azn * vy;
+    float ey = azn * vx - axn * vz;
+    float ez = axn * vy - ayn * vx;
+    nx += TILT_GAIN * ex; ny += TILT_GAIN * ey; nz += TILT_GAIN * ez;
+  }
+#endif
+
+  float norm = sqrtf(nw * nw + nx * nx + ny * ny + nz * nz);
+  if (norm > 1e-6f) {                      // never publish a degenerate quaternion
+    pkt.w = nw / norm; pkt.x = nx / norm; pkt.y = ny / norm; pkt.z = nz / norm;
+  }
+  pkt.ax = a.acceleration.x; pkt.ay = a.acceleration.y; pkt.az = a.acceleration.z;
 }
 
 // SoftPot: capture the START position on touch-down, track CURRENT while touched,
@@ -219,10 +361,43 @@ void setup() {
   analogRead(PIN_SOFTPOT);                       // let the core configure the pin first
   gpio_pulldown_en((gpio_num_t)PIN_SOFTPOT);     // then latch the pulldown on
 
+  // Bring the shared I2C bus up ONCE, here, before anything that uses it. Both U8g2 and
+  // Adafruit_MPU6050 would otherwise each init Wire on their own terms and fight over the
+  // clock; setting it explicitly keeps that in one place.
+  Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
+  Wire.setClock(400000);     // both the SSD1306 and the MPU-6050 are happy at 400 kHz
+
   Serial.println("[OLED] begin (72x40, hardware I2C SDA=5 SCL=6)...");
   display.begin();
   display.setContrast(64);   // ~quarter brightness — cuts OLED current a lot; still
                              // easily readable, and less rail sag on battery power
+
+  i2cScan();                 // expect 0x3C (OLED) and 0x68 (MPU-6050)
+
+  // The IMU is optional at runtime: a Mini with no IMU (or a broken one) should still be a
+  // useful SoftPot + buttons board rather than a brick, so log and carry on instead of
+  // halting the way the big trackers do.
+  imuOK = mpu.begin(MPU_ADDR, &Wire);
+  if (imuOK) {
+    // +-500 deg/s and +-4 g suit hand motion: headroom for a brisk gesture without
+    // throwing away resolution. The 21 Hz filter tames noise well above our 100 Hz rate.
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    Serial.println("[IMU] MPU-6050 ready");
+    calibrateGyro();
+    lastImuMs = millis();
+  } else {
+    Serial.println("[IMU] MPU-6050 NOT FOUND at 0x68 — check SDA=5/SCL=6/3V3; running "
+                   "without orientation (quaternion stays identity)");
+    display.clearBuffer();
+    display.setFont(u8g2_font_6x10_tr);
+    display.drawStr(0, 14, "NO IMU");
+    display.drawStr(0, 26, "chk wiring");
+    display.sendBuffer();
+    delay(1500);
+  }
+
   drawOLED();
 
   setupBLE();
@@ -241,6 +416,14 @@ void loop() {
     pkt.calib ^= 1;
     captureCount++;
     Serial.printf(">> X-RAY CAPTURE #%lu\n", (unsigned long)captureCount);
+  }
+
+  // Integrate the gyro on a fixed 100 Hz cadence (faster than the 50 Hz notify, so the
+  // orientation being sent is always fresh).
+  if (imuOK && (now - lastImuMs >= IMU_INTERVAL_MS)) {
+    lastImuMs += IMU_INTERVAL_MS;                // fixed step: dt stays exactly IMU_DT
+    if (now - lastImuMs > 5 * IMU_INTERVAL_MS) lastImuMs = now;   // resync after a stall
+    updateIMU();
   }
 
   if (now - lastNotifyMs >= NOTIFY_INTERVAL_MS) {

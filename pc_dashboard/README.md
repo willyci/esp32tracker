@@ -167,10 +167,11 @@ X-ray goes off rather than latching on forever.
 
 ### 10. Mini trackers
 The ESP32-C3 0.42"-OLED glove units (`../firmware/left-mini/`, `../firmware/right-mini/` —
-SoftPot + X-ray button + capture button, no IMU) are **drop-in alternatives for the hand
+MPU-6050 + SoftPot + X-ray button + capture button) are **drop-in alternatives for the hand
 slots**: "Left Mini Tracker" fills the same card as "Left Hand Tracker" (first one found
-wins the slot). The cube stays frozen (identity quaternion — orientation comes from the
-headset), but the SoftPot track, the simulation panel's grab/twist, the shared X-ray
+wins the slot). The cube rotates from the MPU-6050's gyro — expect slow drift, since a
+6-DOF IMU has no absolute reference; re-center as needed. The SoftPot track, the
+simulation panel's grab/twist, the shared X-ray
 toggle, and the capture counter/flash all work exactly as with the big trackers.
 
 ### 8. Latency feel
