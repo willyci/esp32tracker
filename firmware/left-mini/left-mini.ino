@@ -101,7 +101,8 @@ U8G2_SSD1306_72X40_ER_F_HW_I2C display(U8G2_R0, /*reset=*/U8X8_PIN_NONE,
                                        /*clock=*/PIN_OLED_SCL, /*data=*/PIN_OLED_SDA);
 
 // ---- IMU ----
-static constexpr uint8_t MPU_ADDR = 0x68;   // AD0 low; 0x69 if AD0 is tied high
+static constexpr uint8_t MPU_ADDR     = 0x68;   // AD0 low  (module default)
+static constexpr uint8_t MPU_ADDR_ALT = 0x69;   // AD0 high — tried automatically as a fallback
 Adafruit_MPU6050 mpu;
 static bool imuOK = false;                  // false = run without orientation, don't halt
 
@@ -206,8 +207,9 @@ void i2cScan() {
   for (uint8_t addr = 1; addr < 127; addr++) {
     Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
-      const char* who = (addr == MPU_ADDR) ? "  <- MPU-6050"
-                      : (addr == 0x3C)     ? "  <- OLED" : "";
+      const char* who = (addr == MPU_ADDR)     ? "  <- MPU-6050"
+                      : (addr == MPU_ADDR_ALT) ? "  <- MPU-6050 (AD0 high)"
+                      : (addr == 0x3C)         ? "  <- OLED" : "";
       Serial.printf("[I2C]   device at 0x%02X%s\n", addr, who);
       found++;
     }
@@ -377,7 +379,14 @@ void setup() {
   // The IMU is optional at runtime: a Mini with no IMU (or a broken one) should still be a
   // useful SoftPot + buttons board rather than a brick, so log and carry on instead of
   // halting the way the big trackers do.
+  // Try BOTH addresses: AD0 low = 0x68, AD0 high = 0x69, and GY-521 modules disagree on
+  // whether they pull AD0 down, leave it floating, or pull it up.
   imuOK = mpu.begin(MPU_ADDR, &Wire);
+  if (!imuOK) {
+    Serial.println("[IMU] nothing at 0x68 — trying 0x69 (AD0 high)...");
+    imuOK = mpu.begin(MPU_ADDR_ALT, &Wire);
+    if (imuOK) Serial.println("[IMU] found at 0x69 instead");
+  }
   if (imuOK) {
     // +-500 deg/s and +-4 g suit hand motion: headroom for a brisk gesture without
     // throwing away resolution. The 21 Hz filter tames noise well above our 100 Hz rate.
@@ -388,8 +397,10 @@ void setup() {
     calibrateGyro();
     lastImuMs = millis();
   } else {
-    Serial.println("[IMU] MPU-6050 NOT FOUND at 0x68 — check SDA=5/SCL=6/3V3; running "
-                   "without orientation (quaternion stays identity)");
+    Serial.println("[IMU] MPU-6050 NOT FOUND at 0x68 or 0x69 — check the [I2C] scan above: "
+                   "if NO address appeared it is wiring/power (SDA=5 SCL=6 VCC=3V3 GND); if an "
+                   "unexpected address appeared, that is the module. Running without "
+                   "orientation (quaternion stays identity); BLE still works.");
     display.clearBuffer();
     display.setFont(u8g2_font_6x10_tr);
     display.drawStr(0, 14, "NO IMU");
