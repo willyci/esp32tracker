@@ -199,6 +199,32 @@ void setupBLE() {
   Serial.println("[BLE] advertising as " DEVICE_NAME);
 }
 
+// Free a jammed bus BEFORE handing it to Wire. If a slave was mid-byte when the ESP32
+// reset, it can sit there holding SDA low forever; every later transaction then blocks and
+// the board looks dead (the OLED never even initialises). The standard cure is to bit-bang
+// up to 9 clock pulses so the slave finishes the byte it thinks it is sending, then issue a
+// STOP. Costs nothing when the bus is healthy.
+void i2cBusRecover() {
+  pinMode(PIN_OLED_SDA, INPUT_PULLUP);
+  pinMode(PIN_OLED_SCL, INPUT_PULLUP);
+  if (digitalRead(PIN_OLED_SDA) == HIGH) return;      // bus is idle — nothing to do
+
+  Serial.println("[I2C] SDA stuck LOW — clocking the bus free...");
+  pinMode(PIN_OLED_SCL, OUTPUT);
+  for (int i = 0; i < 9 && digitalRead(PIN_OLED_SDA) == LOW; i++) {
+    digitalWrite(PIN_OLED_SCL, LOW);  delayMicroseconds(5);
+    digitalWrite(PIN_OLED_SCL, HIGH); delayMicroseconds(5);
+  }
+  // Manual STOP: SDA rises while SCL is high.
+  pinMode(PIN_OLED_SDA, OUTPUT); digitalWrite(PIN_OLED_SDA, LOW);  delayMicroseconds(5);
+  digitalWrite(PIN_OLED_SCL, HIGH); delayMicroseconds(5);
+  digitalWrite(PIN_OLED_SDA, HIGH); delayMicroseconds(5);
+  pinMode(PIN_OLED_SDA, INPUT_PULLUP);
+  pinMode(PIN_OLED_SCL, INPUT_PULLUP);
+  Serial.printf("[I2C] recovery done, SDA now %s\n",
+                digitalRead(PIN_OLED_SDA) == HIGH ? "HIGH (ok)" : "STILL LOW (hardware)");
+}
+
 // Log every device answering on the shared I2C bus. Expect BOTH 0x3C (OLED) and 0x68
 // (MPU-6050) — this is the wiring check after adding the IMU.
 void i2cScan() {
@@ -345,7 +371,7 @@ void drawOLED() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n\n=== ESP32-C3 Mini Tracker (SoftPot + 2 buttons, no IMU) ===");
+  Serial.println("\n\n=== ESP32-C3 Mini Tracker (MPU-6050 + SoftPot + 2 buttons) ===");
   Serial.println("Device: " DEVICE_NAME);
 
   // Buttons: drive one pin of each pair LOW as its ground, read the other with the
@@ -366,15 +392,24 @@ void setup() {
   // Bring the shared I2C bus up ONCE, here, before anything that uses it. Both U8g2 and
   // Adafruit_MPU6050 would otherwise each init Wire on their own terms and fight over the
   // clock; setting it explicitly keeps that in one place.
+  i2cBusRecover();           // unstick the bus before Wire touches it
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
-  Wire.setClock(400000);     // both the SSD1306 and the MPU-6050 are happy at 400 kHz
+  Wire.setClock(100000);     // 100 kHz: conservative for two devices + jumper wires. Both
+                             // parts do 400 kHz, but a marginal bus fails in confusing ways.
+  // A device holding SDA low (mis-wired, half-powered, or mid-transaction after a reset)
+  // jams the WHOLE bus. Without a timeout the first transaction blocks forever and the
+  // board looks dead — the big trackers learned this too. Fail fast instead.
+  Wire.setTimeOut(50);
+
+  // Scan BEFORE touching the display: if the bus is jammed, display.begin() is what hangs,
+  // and doing the scan first means we still learn what is (or isn't) out there.
+  i2cScan();                 // expect 0x3C (OLED) and 0x68 (MPU-6050)
 
   Serial.println("[OLED] begin (72x40, hardware I2C SDA=5 SCL=6)...");
   display.begin();
   display.setContrast(64);   // ~quarter brightness — cuts OLED current a lot; still
                              // easily readable, and less rail sag on battery power
-
-  i2cScan();                 // expect 0x3C (OLED) and 0x68 (MPU-6050)
+  Serial.println("[OLED] ready");
 
   // The IMU is optional at runtime: a Mini with no IMU (or a broken one) should still be a
   // useful SoftPot + buttons board rather than a brick, so log and carry on instead of
