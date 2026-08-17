@@ -392,24 +392,26 @@ void setup() {
   // Bring the shared I2C bus up ONCE, here, before anything that uses it. Both U8g2 and
   // Adafruit_MPU6050 would otherwise each init Wire on their own terms and fight over the
   // clock; setting it explicitly keeps that in one place.
-  i2cBusRecover();           // unstick the bus before Wire touches it
-  Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
-  Wire.setClock(100000);     // 100 kHz: conservative for two devices + jumper wires. Both
-                             // parts do 400 kHz, but a marginal bus fails in confusing ways.
-  // A device holding SDA low (mis-wired, half-powered, or mid-transaction after a reset)
-  // jams the WHOLE bus. Without a timeout the first transaction blocks forever and the
-  // board looks dead — the big trackers learned this too. Fail fast instead.
-  Wire.setTimeOut(50);
-
-  // Scan BEFORE touching the display: if the bus is jammed, display.begin() is what hangs,
-  // and doing the scan first means we still learn what is (or isn't) out there.
-  i2cScan();                 // expect 0x3C (OLED) and 0x68 (MPU-6050)
+  // ORDER MATTERS HERE. U8g2 initialises Wire itself (on the pins in its constructor), and
+  // calling Wire.begin() ourselves beforehand wedges display.begin() — it hangs, taking the
+  // screen, the scan, and BLE with it. So let U8g2 own bus setup, exactly as it did before
+  // the IMU existed, and have everything else piggy-back on the bus it opened.
+  // (i2cBusRecover only touches raw GPIO, so it is safe to run first.)
+  i2cBusRecover();
 
   Serial.println("[OLED] begin (72x40, hardware I2C SDA=5 SCL=6)...");
-  display.begin();
+  display.begin();           // <-- this is what calls Wire.begin(SDA=5, SCL=6)
   display.setContrast(64);   // ~quarter brightness — cuts OLED current a lot; still
                              // easily readable, and less rail sag on battery power
   Serial.println("[OLED] ready");
+
+  // Now tune the bus U8g2 opened. 100 kHz is conservative for two devices on jumper wires;
+  // both parts do 400 kHz, but a marginal bus fails in confusing ways. The timeout stops a
+  // stuck transaction from blocking forever — the big trackers learned that one too.
+  Wire.setClock(100000);
+  Wire.setTimeOut(50);
+
+  i2cScan();                 // expect 0x3C (OLED) and 0x68 (MPU-6050)
 
   // The IMU is optional at runtime: a Mini with no IMU (or a broken one) should still be a
   // useful SoftPot + buttons board rather than a brick, so log and carry on instead of
