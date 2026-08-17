@@ -46,12 +46,11 @@
 // on the OLED and serial instead. Do not repurpose it.
 //
 // Libraries: NimBLE-Arduino 1.4.x (not 2.x), U8g2 (needs a version with the 72X40_ER
-// constructor, v2.34+ — update U8g2 if the constructor is not found), Adafruit MPU6050
-// (which pulls in Adafruit Unified Sensor).
+// constructor, v2.34+ — update U8g2 if the constructor is not found). NO IMU library is
+// needed: the MPU-6050 is driven directly over Wire (see the IMU section for why).
 // Board: "ESP32C3 Dev Module", core 2.0.17, USB CDC On Boot: Enabled, 115200 baud.
 
 #include <Wire.h>
-#include <Adafruit_MPU6050.h>
 #include <NimBLEDevice.h>
 #include <U8g2lib.h>
 #include "driver/gpio.h"   // gpio_pulldown_en — keeps the SoftPot pin from floating
@@ -100,10 +99,31 @@ static OrientationPacket pkt = { 1, 0, 0, 0,  0, 0, 0,  0, 0, 0, 0 };
 U8G2_SSD1306_72X40_ER_F_HW_I2C display(U8G2_R0, /*reset=*/U8X8_PIN_NONE,
                                        /*clock=*/PIN_OLED_SCL, /*data=*/PIN_OLED_SDA);
 
-// ---- IMU ----
+// ---- IMU: minimal MPU-6050 driver, no library ----
+// Deliberately NOT using Adafruit_MPU6050: its begin() reads WHO_AM_I and refuses to run
+// unless it reads exactly 0x68. Cheap GY-521 modules very often carry a clone die (or an
+// MPU-6500/9250) reporting 0x70/0x72/0x98/etc, so the library rejects a working chip —
+// which is exactly what happened here (the I2C scan saw 0x68 ACK, begin() still failed).
+// The register interface is simple and shared across the whole MPU-6xxx family, so we
+// drive it directly and log whatever WHO_AM_I says instead of gating on it.
 static constexpr uint8_t MPU_ADDR     = 0x68;   // AD0 low  (module default)
 static constexpr uint8_t MPU_ADDR_ALT = 0x69;   // AD0 high — tried automatically as a fallback
-Adafruit_MPU6050 mpu;
+static uint8_t mpuAddr = MPU_ADDR;              // whichever answered
+
+static constexpr uint8_t REG_SMPLRT_DIV   = 0x19;
+static constexpr uint8_t REG_CONFIG       = 0x1A;
+static constexpr uint8_t REG_GYRO_CONFIG  = 0x1B;
+static constexpr uint8_t REG_ACCEL_CONFIG = 0x1C;
+static constexpr uint8_t REG_ACCEL_XOUT_H = 0x3B;
+static constexpr uint8_t REG_PWR_MGMT_1   = 0x6B;
+static constexpr uint8_t REG_WHO_AM_I     = 0x75;
+
+// Ranges chosen below: +-500 deg/s and +-4 g. These are the matching LSB scale factors.
+static constexpr float GYRO_LSB_PER_DPS = 65.5f;
+static constexpr float ACCEL_LSB_PER_G  = 8192.0f;
+static constexpr float DEG2RAD          = 0.01745329252f;
+static constexpr float G_MPS2           = 9.80665f;
+
 static bool imuOK = false;                  // false = run without orientation, don't halt
 
 // Integrate on a FIXED cadence so dt is a known constant rather than whatever the loop
@@ -244,6 +264,69 @@ void i2cScan() {
     Serial.println("[I2C]   NONE found — check SDA/SCL/3V3/GND wiring");
 }
 
+// ---- raw register access ----
+bool mpuWrite(uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(mpuAddr);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+
+bool mpuReadBytes(uint8_t reg, uint8_t* buf, uint8_t len) {
+  Wire.beginTransmission(mpuAddr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;      // repeated start
+  if (Wire.requestFrom((int)mpuAddr, (int)len) != len) return false;
+  for (uint8_t i = 0; i < len; i++) buf[i] = Wire.read();
+  return true;
+}
+
+// Read accel + gyro in ONE burst (they are contiguous from 0x3B, with temperature in the
+// middle), so the two are sampled from the same instant. Big-endian int16 pairs.
+bool mpuReadMotion(float* ax, float* ay, float* az, float* gx, float* gy, float* gz) {
+  uint8_t b[14];
+  if (!mpuReadBytes(REG_ACCEL_XOUT_H, b, sizeof(b))) return false;
+  auto i16 = [&](int i) { return (int16_t)((b[i] << 8) | b[i + 1]); };
+  *ax = i16(0)  / ACCEL_LSB_PER_G * G_MPS2;   // m/s^2, as the packet documents
+  *ay = i16(2)  / ACCEL_LSB_PER_G * G_MPS2;
+  *az = i16(4)  / ACCEL_LSB_PER_G * G_MPS2;
+  // b[6..7] = temperature, skipped
+  *gx = i16(8)  / GYRO_LSB_PER_DPS * DEG2RAD; // rad/s, matching the integration code
+  *gy = i16(10) / GYRO_LSB_PER_DPS * DEG2RAD;
+  *gz = i16(12) / GYRO_LSB_PER_DPS * DEG2RAD;
+  return true;
+}
+
+// Wake the chip and configure it. Returns false only if the device does not respond at
+// all — NOT on an unexpected WHO_AM_I, which is logged but tolerated (see the note above).
+bool mpuInit(uint8_t addr) {
+  mpuAddr = addr;
+  uint8_t who = 0;
+  if (!mpuReadBytes(REG_WHO_AM_I, &who, 1)) return false;   // nothing home at this address
+  Serial.printf("[IMU] WHO_AM_I at 0x%02X = 0x%02X%s\n", addr, who,
+                who == 0x68 ? " (genuine MPU-6050)" : " (clone/variant — using it anyway)");
+
+  if (!mpuWrite(REG_PWR_MGMT_1, 0x80)) return false;        // device reset
+  delay(100);
+  if (!mpuWrite(REG_PWR_MGMT_1, 0x01)) return false;        // wake, clock = gyro X PLL
+  delay(10);
+  mpuWrite(REG_CONFIG,       0x04);   // DLPF ~21 Hz — tames noise, well above our 100 Hz
+  mpuWrite(REG_GYRO_CONFIG,  0x08);   // +-500 deg/s   (matches GYRO_LSB_PER_DPS)
+  mpuWrite(REG_ACCEL_CONFIG, 0x08);   // +-4 g         (matches ACCEL_LSB_PER_G)
+  mpuWrite(REG_SMPLRT_DIV,   0x09);   // 1 kHz / (1+9) = 100 Hz, matching IMU_HZ
+
+  // Prove it actually streams before declaring success — a chip that ACKs but returns
+  // nothing but zeros is worse than one that fails outright.
+  float ax, ay, az, gx, gy, gz;
+  if (!mpuReadMotion(&ax, &ay, &az, &gx, &gy, &gz)) return false;
+  float amag = sqrtf(ax * ax + ay * ay + az * az);
+  Serial.printf("[IMU] first sample: accel %.2f m/s^2 (expect ~9.8 at rest)\n", amag);
+  if (amag < 1.0f) {
+    Serial.println("[IMU] WARNING: accel reads ~0 — chip may be asleep or damaged");
+  }
+  return true;
+}
+
 // Average the gyro while the board sits still; that average IS the bias. This is the
 // single biggest lever on drift, which is why the board must be left alone here.
 void calibrateGyro() {
@@ -257,9 +340,10 @@ void calibrateGyro() {
   const int samples = 300;                 // ~1.5 s at 5 ms/sample
   double sum[3] = { 0, 0, 0 };
   for (int i = 0; i < samples; i++) {
-    sensors_event_t a, g, t;
-    mpu.getEvent(&a, &g, &t);
-    sum[0] += g.gyro.x; sum[1] += g.gyro.y; sum[2] += g.gyro.z;
+    float ax, ay, az, gx, gy, gz;
+    if (mpuReadMotion(&ax, &ay, &az, &gx, &gy, &gz)) {
+      sum[0] += gx; sum[1] += gy; sum[2] += gz;
+    }
     delay(5);
   }
   for (int i = 0; i < 3; i++) gyroBias[i] = (float)(sum[i] / samples);
@@ -271,12 +355,12 @@ void calibrateGyro() {
 // over IMU_DT: q += 0.5 * q * omega * dt, then renormalized. Accel is copied through for
 // the dashboard's readouts (it does not steer orientation unless USE_ACCEL_TILT).
 void updateIMU() {
-  sensors_event_t a, g, t;
-  mpu.getEvent(&a, &g, &t);
+  float rax, ray, raz, rgx, rgy, rgz;
+  if (!mpuReadMotion(&rax, &ray, &raz, &rgx, &rgy, &rgz)) return;   // skip a bad read
 
-  float gx = g.gyro.x - gyroBias[0];       // rad/s
-  float gy = g.gyro.y - gyroBias[1];
-  float gz = g.gyro.z - gyroBias[2];
+  float gx = rgx - gyroBias[0];            // rad/s
+  float gy = rgy - gyroBias[1];
+  float gz = rgz - gyroBias[2];
   if (fabsf(gx) < GYRO_DEADBAND_RADS) gx = 0;
   if (fabsf(gy) < GYRO_DEADBAND_RADS) gy = 0;
   if (fabsf(gz) < GYRO_DEADBAND_RADS) gz = 0;
@@ -292,11 +376,9 @@ void updateIMU() {
   // Nudge the estimate so the measured gravity direction lines up with the quaternion's
   // idea of "down". Only affects roll/pitch — rotation about gravity is invisible to an
   // accelerometer, so yaw is untouched.
-  float amag = sqrtf(a.acceleration.x * a.acceleration.x +
-                     a.acceleration.y * a.acceleration.y +
-                     a.acceleration.z * a.acceleration.z);
+  float amag = sqrtf(rax * rax + ray * ray + raz * raz);
   if (amag > 6.0f && amag < 13.0f) {       // only when close to 1 g (not being shaken)
-    float axn = a.acceleration.x / amag, ayn = a.acceleration.y / amag, azn = a.acceleration.z / amag;
+    float axn = rax / amag, ayn = ray / amag, azn = raz / amag;
     // Gravity as the current quaternion predicts it (third row of the rotation matrix).
     float vx = 2.0f * (nx * nz - nw * ny);
     float vy = 2.0f * (nw * nx + ny * nz);
@@ -313,7 +395,7 @@ void updateIMU() {
   if (norm > 1e-6f) {                      // never publish a degenerate quaternion
     pkt.w = nw / norm; pkt.x = nx / norm; pkt.y = ny / norm; pkt.z = nz / norm;
   }
-  pkt.ax = a.acceleration.x; pkt.ay = a.acceleration.y; pkt.az = a.acceleration.z;
+  pkt.ax = rax; pkt.ay = ray; pkt.az = raz;
 }
 
 // SoftPot: capture the START position on touch-down, track CURRENT while touched,
@@ -389,9 +471,6 @@ void setup() {
   analogRead(PIN_SOFTPOT);                       // let the core configure the pin first
   gpio_pulldown_en((gpio_num_t)PIN_SOFTPOT);     // then latch the pulldown on
 
-  // Bring the shared I2C bus up ONCE, here, before anything that uses it. Both U8g2 and
-  // Adafruit_MPU6050 would otherwise each init Wire on their own terms and fight over the
-  // clock; setting it explicitly keeps that in one place.
   // ORDER MATTERS HERE. U8g2 initialises Wire itself (on the pins in its constructor), and
   // calling Wire.begin() ourselves beforehand wedges display.begin() — it hangs, taking the
   // screen, the scan, and BLE with it. So let U8g2 own bus setup, exactly as it did before
@@ -418,18 +497,13 @@ void setup() {
   // halting the way the big trackers do.
   // Try BOTH addresses: AD0 low = 0x68, AD0 high = 0x69, and GY-521 modules disagree on
   // whether they pull AD0 down, leave it floating, or pull it up.
-  imuOK = mpu.begin(MPU_ADDR, &Wire);
+  imuOK = mpuInit(MPU_ADDR);
   if (!imuOK) {
     Serial.println("[IMU] nothing at 0x68 — trying 0x69 (AD0 high)...");
-    imuOK = mpu.begin(MPU_ADDR_ALT, &Wire);
+    imuOK = mpuInit(MPU_ADDR_ALT);
     if (imuOK) Serial.println("[IMU] found at 0x69 instead");
   }
   if (imuOK) {
-    // +-500 deg/s and +-4 g suit hand motion: headroom for a brisk gesture without
-    // throwing away resolution. The 21 Hz filter tames noise well above our 100 Hz rate.
-    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-    mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
-    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
     Serial.println("[IMU] MPU-6050 ready");
     calibrateGyro();
     lastImuMs = millis();
