@@ -12,10 +12,22 @@ enum Hand: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var label: String { self == .left ? "Left" : "Right" }
 
-    /// Map a BLE advertised name to a hand (nil if it isn't one of our trackers).
+    /// The Mini tracker's advertised name for this same hand slot (ESP32-C3 + 0.42" OLED,
+    /// no IMU: SoftPot + buttons only). A Mini is a drop-in alternative for a hand.
+    var miniName: String { self == .left ? "Left Mini Tracker" : "Right Mini Tracker" }
+
+    /// Map a BLE advertised name to a hand — matches either the full tracker or the Mini
+    /// name (nil if it isn't one of ours).
     static func from(advertisedName name: String?) -> Hand? {
         guard let name else { return nil }
-        return Hand.allCases.first { name.contains($0.rawValue) }
+        return Hand.allCases.first { name.contains($0.rawValue) || name.contains($0.miniName) }
+    }
+
+    /// Whether the matched board is a Mini (no IMU; repurposes the `calib` byte as a
+    /// capture-toggle bit — see `TrackerState.ingest`).
+    static func isMini(advertisedName name: String?) -> Bool {
+        guard let name else { return false }
+        return Hand.allCases.contains { name.contains($0.miniName) }
     }
 }
 
@@ -58,6 +70,14 @@ final class TrackerState: ObservableObject, Identifiable {
     var onXrayToggle: (() -> Void)?
     private var lastXrayBit: UInt8 = 0
 
+    /// True when this slot is filled by a Mini tracker (no IMU). A Mini has no real
+    /// calibration, so it repurposes the `calib` byte (28) as a capture-toggle bit.
+    var isMini = false
+    /// Fired when a Mini's capture button toggles that byte; BLEManager fires a capture.
+    var onCapture: (() -> Void)?
+    private var lastCaptureBit: UInt8 = 0
+    private var captureBaselined = false
+
     /// Fired after every parsed packet — SimulationModel consumes samples from here.
     var onSample: ((TrackerState) -> Void)?
 
@@ -97,7 +117,19 @@ final class TrackerState: ObservableObject, Identifiable {
         // (flipping those two — not pitch — is a valid rotation). See BLEManager history.
         quaternion  = simd_quatf(ix: -x, iy: y, iz: -z, r: w)   // (x, y, z, w) arg order
         accel       = SIMD3<Float>(data.readFloat(at: 16), data.readFloat(at: 20), data.readFloat(at: 24))
-        calibration = data[data.startIndex + 28]
+
+        let calibByte = data[data.startIndex + 28]
+        if isMini {
+            // Mini has no IMU: byte 28 is a capture-toggle bit, not a calibration value.
+            // ANY change = one capture press (baseline the first packet so connecting
+            // mid-press doesn't fire a phantom capture). Keep displayed calibration at 0.
+            if captureBaselined, calibByte != lastCaptureBit { onCapture?() }
+            lastCaptureBit = calibByte
+            captureBaselined = true
+            calibration = 0
+        } else {
+            calibration = calibByte   // real tracker: legitimate 0–3
+        }
         touchStart  = data[data.startIndex + 29]
         touchCurrent = data[data.startIndex + 30]
 

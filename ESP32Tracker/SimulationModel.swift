@@ -37,8 +37,21 @@ final class SimulationModel: ObservableObject {
     }
 
     // Same limits/scales as VascCath: catheter 0–0.58 m @ 0.635, wire 0–0.61 m @ 0.63.
-    private static let maxInsertion: [Hand: Float] = [.left: 0.58, .right: 0.61]
+    static let maxInsertion: [Hand: Float] = [.left: 0.58, .right: 0.61]
     private static let insertionScale: [Hand: Float] = [.left: 0.635, .right: 0.63]
+
+    /// Freeze the current sim state for a capture (the two photos render from this).
+    func captureScene(index: Int, xrayOn: Bool, dsaActive: Bool, dsaRuns: Int) -> CaptureScene {
+        CaptureScene(index: index,
+                     takenAt: Date(),
+                     catheter: catheter,
+                     wire: wire,
+                     xrayOn: xrayOn,
+                     dsaActive: dsaActive,
+                     dsaRuns: dsaRuns,
+                     catheterMax: Self.maxInsertion[.left] ?? 0.58,
+                     wireMax: Self.maxInsertion[.right] ?? 0.61)
+    }
 
     /// Sliding the full 255-unit strip = this many full turns.
     private static let stripFullTurns: Float = 1.0

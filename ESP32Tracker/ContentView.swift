@@ -1,8 +1,10 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @EnvironmentObject var ble: BLEManager
     @EnvironmentObject var sim: SimulationModel
+    @EnvironmentObject var captures: CaptureStore
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @State private var simOpen = false
@@ -74,11 +76,25 @@ struct ContentView: View {
                         }
                     }
                     Spacer()
-                    if let last = sim.snapshots.last {
-                        Text("last: \(last.takenAt.formatted(date: .omitted, time: .standard)) · C \(String(format: "%.1f", last.catheter.insertion * 100))cm · W \(String(format: "%.1f", last.wire.insertion * 100))cm")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                }
+
+                // Last capture: the two photos the pedal takes — the X-ray monitor image
+                // and the 180° room view. Both are also written to Documents/Captures.
+                if let last = captures.latest {
+                    HStack(alignment: .top, spacing: 12) {
+                        capturedThumb("X-ray monitor", last.xray)
+                        capturedThumb("180° room", last.room)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("IMG \(last.scene.index) · \(last.scene.takenAt.formatted(date: .omitted, time: .standard))")
+                                .font(.caption.weight(.semibold))
+                            Text(String(format: "C %.1f cm · W %.1f cm",
+                                        last.scene.catheter.insertion * 100,
+                                        last.scene.wire.insertion * 100))
+                                .font(.caption2).foregroundStyle(.secondary)
+                            Text(last.scene.dsaActive ? "DSA run" : (last.scene.xrayOn ? "fluoro" : "standby"))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Spacer()
                     }
                 }
 
@@ -136,6 +152,25 @@ struct ContentView: View {
             if !simOpen, await openImmersiveSpace(id: "simulation") == .opened {
                 simOpen = true
             }
+        }
+    }
+
+    /// One capture thumbnail with its caption.
+    private func capturedThumb(_ title: String, _ image: UIImage?) -> some View {
+        VStack(spacing: 4) {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 132, height: 92)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(.quaternary)
+                    .frame(width: 132, height: 92)
+                    .overlay(Text("no image").font(.caption2).foregroundStyle(.secondary))
+            }
+            Text(title).font(.caption2).foregroundStyle(.secondary)
         }
     }
 }
@@ -288,4 +323,5 @@ struct TrackerPanel: View {
     ContentView()
         .environmentObject(ble)
         .environmentObject(SimulationModel(ble: ble))
+        .environmentObject(CaptureStore())
 }
