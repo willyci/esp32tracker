@@ -165,6 +165,26 @@ A plain 2-wire button cannot distinguish "not pressed" from "not connected" at a
 Same fail-safe as the fluoro pedal (4 s of silence): if a pedal dies mid-run, the run ends and
 X-ray goes off rather than latching on forever.
 
+### 9c. Touchscreen pedal panel
+`../firmware/pedal-panel/` — a Waveshare ESP32-S3-Touch-AMOLED-2.06 that replaces all three
+foot pedals with one screen: three full-width buttons (X-RAY / DSA / CAPTURE) with LRA haptics
+and a speaker click.
+
+It broadcasts under the name **`Pedal Panel`**, using the same 5-byte manufacturer data as the
+pedals but with the level byte as a **bitfield**: `bit0` = X-ray held, `bit1` = DSA run, and the
+count byte = captures. X-RAY and DSA are **hold** controls (finger down = active), matching the
+real pedals' dead-man behaviour; CAPTURE is a tap. The buttons show accumulated fluoro and run
+time (`X-RAY 12s`, `DSA 3s`) and the capture count.
+
+**The panel and the foot pedals are independent sources of the same two signals**, so the
+dashboard ORs them (`xray_held()` / `dsa_running()`). You can run both at once and neither
+cancels the other — an earlier version shared one variable, and an idle panel's advertisement
+would silently release a genuinely held foot pedal.
+
+Because it is broadcast-only it never takes an AVP connection slot, but it also **cannot know
+whether anyone is listening**: its status screen reports *advertising*, not *connected*, and it
+switches to the buttons on a 15 s timer.
+
 ### 10. Mini trackers
 The ESP32-C3 0.42"-OLED glove units (`../firmware/left-mini/`, `../firmware/right-mini/` —
 MPU-6050 + SoftPot + X-ray button + capture button) are **drop-in alternatives for the hand

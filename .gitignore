@@ -28,3 +28,6 @@ firmware/**/build/
 # Python bytecode (pc_dashboard)
 __pycache__/
 *.pyc
+
+# Waveshare board-support repo, cloned separately (has its own .git)
+ESP32-S3-Touch-AMOLED-2.06/

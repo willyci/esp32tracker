@@ -48,7 +48,12 @@ PEDAL_ALIASES = {
     "left-foot":  ("Left Foot Pedal",),    # level = X-ray on while the foot is down
     "right-foot": ("Right Foot Pedal",),   # count change = one X-ray screen capture
     "dsa-foot":   ("DSA Foot Pedal",),     # level = DSA contrast run in progress
+    # The touchscreen panel replaces all three pedals with one device, so its `level` byte
+    # is a BITFIELD rather than a single flag. Same 5-byte manufacturer-data shape.
+    "panel":      ("Pedal Panel",),        # bit0 = X-ray held, bit1 = DSA run; count = captures
 }
+PANEL_LEVEL_XRAY = 0x01
+PANEL_LEVEL_DSA  = 0x02
 ALL_ALIASES = {**DEVICE_ALIASES, **PEDAL_ALIASES}
 DEVICE_NAMES = {dev: " / ".join(names) for dev, names in ALL_ALIASES.items()}  # for logs
 
@@ -78,14 +83,19 @@ state = {
 }
 # X-ray comes from three independent sources, OR'd together:
 #   latched_xray — hand-tracker / mini BUTTONS toggle it (click on, click off)
-#   pedal_held   — the LEFT PEDAL's live broadcast level (on only while the foot is down)
-#   dsa_active   — the DSA PEDAL's live level. A DSA run IS an X-ray acquisition, so a run
-#                  implies imaging; it additionally fills the vessel with contrast.
+#   foot_xray / panel_xray — X-ray held, from the FOOT PEDAL and the TOUCH PANEL respectively
+#   foot_dsa  / panel_dsa  — DSA run in progress, from those same two sources
+# The pedal and the panel are INDEPENDENT sources of the same two signals, so each keeps its
+# own level and the effective signal is the OR (see xray_held()/dsa_running()). Sharing one
+# variable meant an idle panel's advertisement cancelled a genuinely held foot pedal.
+# A DSA run IS an X-ray acquisition, so a run implies imaging and also fills the vessel.
 # Effective state = OR of the three, so a pedal always wins while it's down and releasing
 # it returns to whatever the buttons had latched.
 latched_xray = False
-pedal_held = False
-dsa_active = False
+foot_xray = False
+panel_xray = False
+foot_dsa = False
+panel_dsa = False
 dsa_runs = 0                              # DSA contrast runs performed
 dsa_fault = False                         # DSA switch wiring fault (COM/NO/NC self-check)
 capture_count = 0                         # total X-ray captures (right pedal + mini capture buttons)
@@ -97,7 +107,19 @@ last_pedal_seen: dict[str, float] = {}    # pedal → loop time of its last adve
 
 def xray_on() -> bool:
     """The single shared X-ray state the UI and simulation consume."""
-    return latched_xray or pedal_held or dsa_active
+    return latched_xray or xray_held() or dsa_running()
+
+
+def xray_held() -> bool:
+    """X-ray held down on ANY source (foot pedal or touch panel)."""
+    return foot_xray or panel_xray
+
+
+def dsa_running() -> bool:
+    """A contrast run in progress on ANY source."""
+    return foot_dsa or panel_dsa
+
+
 busy: set[str] = set()                    # devices currently connecting/connected
 websockets: set[web.WebSocketResponse] = set()
 
@@ -137,7 +159,8 @@ def on_pedal_ad(pedal: str, mfg_data: dict[int, bytes], now: float) -> None:
       DSA   pedal: `level` is a LIVE LEVEL → contrast run in progress (implies X-ray);
                    a changed `count` numbers the runs; `flags` bit0 = switch wiring fault.
     """
-    global pedal_held, capture_count, dsa_active, dsa_runs, dsa_fault
+    global foot_xray, panel_xray, foot_dsa, panel_dsa
+    global capture_count, dsa_runs, dsa_fault
     payload = mfg_data.get(0xFFFF)
     if not payload:
         return
@@ -154,12 +177,13 @@ def on_pedal_ad(pedal: str, mfg_data: dict[int, bytes], now: float) -> None:
                   f"activate CANNOT work. Reflash firmware/{pedal}/{pedal}.ino")
 
     count = payload[0]
-    level = bool(payload[1]) if len(payload) > 1 else False
+    level_raw = payload[1] if len(payload) > 1 else 0
+    level = bool(level_raw)          # single-flag pedals; the panel reads level_raw as bits
     flags = payload[2] if len(payload) > 2 else 0
 
     if pedal == "left-foot":
-        if level != pedal_held:
-            pedal_held = level
+        if level != foot_xray:
+            foot_xray = level
             print(f"[xray] left pedal {'DOWN' if level else 'UP'} -> X-RAY "
                   f"{'ON' if xray_on() else 'OFF'}")
     elif pedal == "right-foot":
@@ -168,14 +192,29 @@ def on_pedal_ad(pedal: str, mfg_data: dict[int, bytes], now: float) -> None:
         if not first_sighting and last_pedal_count.get(pedal) != count:
             capture_count += 1
             print(f"[capture] right pedal -> X-RAY CAPTURE #{capture_count}")
+    elif pedal == "panel":
+        # One device carrying all three controls: two live levels plus the capture counter.
+        held = bool(level_raw & PANEL_LEVEL_XRAY)
+        run  = bool(level_raw & PANEL_LEVEL_DSA)
+        if held != panel_xray:
+            panel_xray = held
+            print(f"[xray] panel X-ray {'DOWN' if held else 'UP'} -> X-RAY "
+                  f"{'ON' if xray_on() else 'OFF'}")
+        if run != panel_dsa:
+            panel_dsa = run
+            print(f"[dsa] panel contrast run {'START' if run else 'END'} -> X-RAY "
+                  f"{'ON' if xray_on() else 'OFF'}")
+        if not first_sighting and last_pedal_count.get(pedal) != count:
+            capture_count += 1
+            print(f"[capture] panel -> X-RAY CAPTURE #{capture_count}")
     elif pedal == "dsa-foot":
         fault = bool(flags & 0x01)
         if fault != dsa_fault:
             dsa_fault = fault
             print("[dsa] SWITCH FAULT — check COM/NO/NC wiring" if fault
                   else "[dsa] switch wiring OK again")
-        if level != dsa_active:
-            dsa_active = level
+        if level != foot_dsa:
+            foot_dsa = level
             print(f"[dsa] contrast run {'START' if level else 'END'} -> X-RAY "
                   f"{'ON' if xray_on() else 'OFF'}")
         if not first_sighting and last_pedal_count.get(pedal) != count:
@@ -193,7 +232,7 @@ def expire_stale_pedals(now: float) -> None:
         normal advertisement gaps are seconds long and flapping the badge (and spamming
         the console) on every gap made real problems impossible to spot.
     """
-    global pedal_held, dsa_active, dsa_fault
+    global foot_xray, panel_xray, foot_dsa, panel_dsa, dsa_fault
     for pedal in PEDAL_ALIASES:
         seen = last_pedal_seen.get(pedal)
         if seen is None:
@@ -202,12 +241,17 @@ def expire_stale_pedals(now: float) -> None:
 
         # Stage 1: release any held level.
         if silent > LEVEL_RELEASE_AFTER:
-            if pedal == "left-foot" and pedal_held:
-                pedal_held = False
+            if pedal == "left-foot" and foot_xray:
+                foot_xray = False
                 print(f"[xray] left pedal silent {silent:.1f}s while held -> X-RAY OFF (fail-safe)")
-            if pedal == "dsa-foot" and dsa_active:
-                dsa_active = False
+            if pedal == "dsa-foot" and foot_dsa:
+                foot_dsa = False
                 print(f"[dsa] pedal silent {silent:.1f}s mid-run -> run ENDED, X-RAY OFF (fail-safe)")
+            if pedal == "panel":
+                # The panel owns BOTH levels, so a lost panel must clear both.
+                if panel_xray or panel_dsa:
+                    panel_xray = panel_dsa = False
+                    print(f"[xray] panel silent {silent:.1f}s -> X-RAY OFF, run ENDED (fail-safe)")
 
         # Stage 2: it's been quiet long enough to call it gone.
         if silent > PEDAL_OFFLINE_AFTER:
@@ -293,8 +337,8 @@ async def scan_loop() -> None:
 async def broadcast_loop() -> None:
     while True:
         if websockets:
-            payload = json.dumps({**state, "xray": xray_on(), "pedalHeld": pedal_held,
-                                  "captureCount": capture_count, "dsaActive": dsa_active,
+            payload = json.dumps({**state, "xray": xray_on(), "pedalHeld": xray_held(),
+                                  "captureCount": capture_count, "dsaActive": dsa_running(),
                                   "dsaRuns": dsa_runs, "dsaFault": dsa_fault})
             await asyncio.gather(
                 *(ws.send_str(payload) for ws in list(websockets)),

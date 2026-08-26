@@ -77,6 +77,7 @@ both**.
 | Fluoro pedal | [`left-foot/`](firmware/left-foot/) | `Left Foot Pedal` | **hold** = X-ray on (broadcast) |
 | Capture pedal | [`right-foot/`](firmware/right-foot/) | `Right Foot Pedal` | press = one X-ray capture (broadcast) |
 | DSA pedal | [`dsa-foot/`](firmware/dsa-foot/) | `DSA Foot Pedal` | **hold** = contrast run (broadcast) |
+| Pedal panel | [`pedal-panel/`](firmware/pedal-panel/) | `Pedal Panel` | touchscreen replacing all three pedals (broadcast) |
 
 A Mini tracker is a drop-in alternative for a hand slot — the dashboard and app accept either name
 for the same hand, over the identical 32-byte packet.
