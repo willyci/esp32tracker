@@ -185,6 +185,25 @@ Because it is broadcast-only it never takes an AVP connection slot, but it also 
 whether anyone is listening**: its status screen reports *advertising*, not *connected*, and it
 switches to the buttons on a 15 s timer.
 
+### 9d. Panel modes (only one half runs at a time)
+The panel does two jobs that are never needed together, and each is expensive, so it runs
+one at a time:
+
+- **PEDAL mode** (default) — the screen and its touch buttons drive X-ray / DSA / capture.
+  IMU integration and the SoftPot are skipped, so the cube **holds its last orientation**
+  rather than snapping to identity. Tap **IMU ▶** (top-right of the button screen) to switch.
+- **TRACKER mode** — orientation and SoftPot at full rate with the **AMOLED powered off**
+  (`displayOff`), LVGL not running and no frames pushed. That reclaims ~10 ms per frame of
+  QSPI time plus the panel's current. The buttons are unavailable, so X-ray/DSA/capture hold
+  their last values. **Tap anywhere to wake** — the touch controller is still polled at
+  10 Hz for exactly that.
+
+Waking always lands on the **status** screen, never straight on the pedals: the tap that
+woke it is probably still under your finger, and landing on the button screen would fire
+X-ray the moment LVGL resumed.
+
+Either way the same 32-byte packet still goes out at 50 Hz — only which fields move changes.
+
 ### 10. Mini trackers
 The ESP32-C3 0.42"-OLED glove units (`../firmware/left-mini/`, `../firmware/right-mini/` —
 MPU-6050 + SoftPot + X-ray button + capture button) are **drop-in alternatives for the hand

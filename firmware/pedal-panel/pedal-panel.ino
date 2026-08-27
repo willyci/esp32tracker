@@ -124,6 +124,21 @@ static constexpr uint8_t LEVEL_DSA  = 0x02;
 static uint32_t xrayHeldMs = 0, dsaHeldMs = 0;
 static uint32_t xraySinceMs = 0, dsaSinceMs = 0;   // millis() at the last press
 
+// ---------------------------------------------------------------------------
+// The two jobs this board does are never needed at once, and each is expensive, so only
+// one runs at a time:
+//   PEDAL   — screen + touch buttons drive X-ray / DSA / capture. IMU integration and the
+//             SoftPot are skipped; the quaternion simply holds its last value.
+//   TRACKER — orientation + SoftPot at full rate with the AMOLED POWERED DOWN. LVGL is not
+//             run and no frame is pushed, which frees the ~10 ms/frame of QSPI and the
+//             panel's backlight current. The touch controller is still polled at 10 Hz —
+//             one cheap I2C read — purely so a tap can wake the screen back up.
+// Either way the same 32-byte packet goes out at 50 Hz; only which fields move changes.
+// ---------------------------------------------------------------------------
+enum PanelMode : uint8_t { MODE_PEDAL, MODE_TRACKER };
+static PanelMode panelMode = MODE_PEDAL;
+static uint32_t lastWakePollMs = 0;
+
 static constexpr uint32_t AUTO_SWITCH_MS = 15000;  // status -> buttons, if not cancelled
 static uint32_t bootMs = 0;
 static bool autoSwitchDone = false;                // also set when the user hits BACK
@@ -435,6 +450,39 @@ void i2cScan() {
 // ---------------------------------------------------------------------------
 // UI
 // ---------------------------------------------------------------------------
+// Power the panel down and hand the CPU to the IMU. Draws a parting notice with GFX (not
+// LVGL — LVGL stops running in this mode) so the screen going dark is not a mystery.
+void enterTrackerMode() {
+  panelMode = MODE_TRACKER;
+  gfx->fillScreen(RGB565_BLACK);
+  gfx->setTextColor(RGB565_WHITE);
+  gfx->setTextSize(3);
+  gfx->setCursor(40, 200);
+  gfx->print("TRACKER MODE");
+  gfx->setTextSize(2);
+  gfx->setCursor(40, 250);
+  gfx->print("screen off - tap to wake");
+  delay(700);                       // long enough to read
+  gfx->displayOff();                // real AMOLED power saving, not just skipped work
+  frameDirty = false;
+  lastImuMs = millis();             // fresh dt, so the first step is not a lurch
+  lastWakePollMs = millis();
+  Serial.println(">> TRACKER mode: screen off, IMU + SoftPot only");
+}
+
+void enterPedalMode() {
+  panelMode = MODE_PEDAL;
+  gfx->displayOn();
+  // Wake onto the STATUS screen, never straight onto the pedals: the tap that woke us is
+  // very likely still under a finger, and landing on the button screen would fire X-ray
+  // the instant LVGL resumes. One extra tap to reach the pedals is the safe trade.
+  autoSwitchDone = true;            // and don't let the 15 s timer jump us there either
+  lv_scr_load(scrStatus);
+  lv_obj_invalidate(scrStatus);     // nothing was drawn while we were away
+  frameDirty = true;
+  Serial.println(">> PEDAL mode: screen on (status), IMU paused");
+}
+
 void showButtons() {
   autoSwitchDone = true;             // never auto-hop again this session
   lv_scr_load(scrButtons);
@@ -444,6 +492,23 @@ static void back_cb(lv_event_t *e) {
   LV_UNUSED(e);
   pressFeedback(24);                 // 24 = sharp tick, lighter than a pedal press
   autoSwitchDone = true;             // BACK must stick: don't bounce to buttons in 15 s
+  // Top-RIGHT mirrors BACK: hand the board over to orientation tracking and blank the
+  // screen. Created last for the same reason BACK is — topmost object wins the click.
+  lv_obj_t *trk = lv_button_create(scrButtons);
+  lv_obj_set_size(trk, 104, 52);
+  lv_obj_align(trk, LV_ALIGN_TOP_RIGHT, -10, 10);
+  lv_obj_set_style_bg_color(trk, lv_color_hex(0x1E3A5F), LV_PART_MAIN);
+  lv_obj_set_style_radius(trk, 10, LV_PART_MAIN);
+  lv_obj_add_event_cb(trk, [](lv_event_t *e) {
+    LV_UNUSED(e);
+    pressFeedback(24);
+    enterTrackerMode();
+  }, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *trkLbl = lv_label_create(trk);
+  lv_label_set_text(trkLbl, "IMU " LV_SYMBOL_RIGHT);
+  lv_obj_set_style_text_font(trkLbl, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_center(trkLbl);
+
   lv_scr_load(scrStatus);
 }
 
@@ -767,21 +832,34 @@ void setup() {
 }
 
 void loop() {
-  lv_task_handler();
-
-#ifdef DIRECT_RENDER_MODE
-  // Pushing a full frame costs ~10 ms of QSPI, so do it only when LVGL actually drew
-  // something. An idle panel now spends that time on BLE and the IMU instead.
-  if (frameDirty) {
-    frameDirty = false;
-    gfx->draw16bitRGBBitmap(0, 0, (uint16_t *)disp_draw_buf, screenWidth, screenHeight);
-  }
-#endif
-
   const uint32_t now = millis();
 
-  // Integrate the gyro at up to 100 Hz, over the time that ACTUALLY elapsed.
-  if (imuOK && (now - lastImuMs >= IMU_INTERVAL_MS)) {
+  if (panelMode == MODE_PEDAL) {
+    lv_task_handler();
+#ifdef DIRECT_RENDER_MODE
+    // Pushing a full frame costs ~10 ms of QSPI, so do it only when LVGL actually drew
+    // something. A static screen costs nothing.
+    if (frameDirty) {
+      frameDirty = false;
+      gfx->draw16bitRGBBitmap(0, 0, (uint16_t *)disp_draw_buf, screenWidth, screenHeight);
+    }
+#endif
+  } else {
+    // TRACKER mode: no LVGL, no pixels. Poll the touch controller slowly, only to notice
+    // a tap asking for the screen back — the ISR has already latched the flag for us.
+    if (now - lastWakePollMs >= 100) {              // 10 Hz is plenty to catch a finger
+      lastWakePollMs = now;
+      if (FT3168->IIC_Interrupt_Flag) {
+        FT3168->IIC_Interrupt_Flag = false;
+        enterPedalMode();
+      }
+    }
+  }
+
+  // Integrate the gyro at up to 100 Hz, over the time that ACTUALLY elapsed. TRACKER mode
+  // only: in PEDAL mode the quaternion holds its last value (freezing beats zeroing — the
+  // consumer's cube stays put instead of snapping to identity).
+  if (panelMode == MODE_TRACKER && imuOK && (now - lastImuMs >= IMU_INTERVAL_MS)) {
     float dt = (now - lastImuMs) * 0.001f;
     if (dt > IMU_DT_MAX) dt = IMU_DT_MAX;         // don't lurch after a stall (audio, boot)
     lastImuMs = now;
@@ -791,7 +869,7 @@ void loop() {
   static uint32_t lastNotifyMs = 0;
   if (now - lastNotifyMs >= 20) {                 // 50 Hz, same cadence as the trackers
     lastNotifyMs = now;
-    readSoftPot();
+    if (panelMode == MODE_TRACKER) readSoftPot();  // paired with the IMU; skipped on pedals
     if (deviceConnected && orientationChar) {
       orientationChar->setValue(reinterpret_cast<uint8_t *>(&pkt), sizeof(pkt));
       orientationChar->notify();
@@ -804,7 +882,8 @@ void loop() {
   // Hand over to the buttons 15 s after boot, but only once a central is actually
   // connected — as specified. With nothing connected there is nothing to drive, so the
   // status screen stays up; tap it to go to the buttons anyway.
-  if (!autoSwitchDone && deviceConnected && (now - bootMs >= AUTO_SWITCH_MS)) showButtons();
+  if (panelMode == MODE_PEDAL && !autoSwitchDone && deviceConnected &&
+      (now - bootMs >= AUTO_SWITCH_MS)) showButtons();
 
   delay(5);
 }
