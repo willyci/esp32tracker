@@ -29,9 +29,22 @@
 //   The board's own 2 motor pads are LEFT UNUSED: that output is the GPIO18 ERM/DC driver,
 //   which is the wrong waveform for an LRA (it would buzz, not click).
 //
+// TOOLCHAIN — THIS BOARD IS THE ODD ONE OUT IN THIS REPO:
+//   * Arduino-ESP32 core **3.3.11** (Waveshare's stated version; the ES8311 audio API
+//     ESP_I2S.h only exists on 3.x). Every OTHER board here needs core 2.0.17, because
+//     NimBLE-Arduino 1.4.x crashes on 3.x — so you must switch the CORE in Boards Manager
+//     depending on which board you are flashing.
+//   * BLE here uses the **core-bundled BLE library**, not NimBLE-Arduino. NimBLE 1.4.x will
+//     not work on core 3.x and NimBLE 2.x would then break the 2.0.17 boards, since the
+//     library version is shared across the sketchbook. Using the bundled BLE means you swap
+//     only the core and never the library.
+//   * The advertisement is built by hand (flags + 128-bit service UUID + manufacturer data,
+//     28 of the 31 available bytes) because the visionOS app scans with a SERVICE FILTER —
+//     drop the UUID and the headset never sees this panel.
+//
 // Board: "ESP32S3 Dev Module", USB CDC On Boot: DISABLED, PSRAM enabled, 115200 baud.
 // Libraries: lvgl 9 + Arduino_GFX + Arduino_DriveBus + XPowersLib (all bundled with the
-// Waveshare repo), NimBLE-Arduino 1.4.x, Adafruit DRV2605, ESP_I2S (core).
+// Waveshare repo), Adafruit DRV2605. BLE and ESP_I2S come with the core.
 
 #include <Wire.h>
 #include <Arduino.h>
@@ -43,7 +56,7 @@
 #include "lv_conf.h"
 
 #include "XPowersLib.h"
-#include <NimBLEDevice.h>
+#include <BLEDevice.h>          // core-bundled BLE — deliberately NOT NimBLE, see below
 #include <Adafruit_DRV2605.h>
 
 #include "ESP_I2S.h"
@@ -127,7 +140,7 @@ static bool hapticsOK = false;
 I2SClass i2s;
 static bool audioOK = false;
 
-NimBLEAdvertising *adv = nullptr;
+BLEAdvertising *adv = nullptr;
 
 // LVGL objects we update later
 static lv_obj_t *scrStatus = nullptr, *scrButtons = nullptr;
@@ -138,31 +151,44 @@ static lv_obj_t *lblXray = nullptr, *lblDsa = nullptr, *lblCapture = nullptr;
 // ---------------------------------------------------------------------------
 // BLE broadcast
 // ---------------------------------------------------------------------------
+// Rebuild the whole advertisement so the current state goes out on the air.
+//
+// The payload is assembled by hand rather than letting the library auto-generate it,
+// because setAdvertisementData() REPLACES the auto payload — and the visionOS app scans
+// with a service filter, so the 128-bit UUID has to be in there or the headset is blind
+// to us. Budget: flags 3 + 128-bit UUID 18 + manufacturer data 7 = 28 of 31 bytes.
+// The device NAME lives in the scan response (it would not fit alongside the UUID).
 void publishAdvertising() {
   uint8_t mfg[5] = { MFG_ID_LO, MFG_ID_HI, captureCount, levelBits, mfgFlags };
+
+  BLEAdvertisementData advData;
+  advData.setFlags(0x06);                       // LE General Discoverable, BR/EDR not supported
+  advData.setCompleteServices(BLEUUID(SERVICE_UUID));
+  // String(ptr, len) — the length-taking ctor, since this payload contains NUL bytes.
+  advData.setManufacturerData(String(reinterpret_cast<const char *>(mfg), sizeof(mfg)));
+
+  BLEAdvertisementData scanData;
+  scanData.setName(DEVICE_NAME);
+
   adv->stop();
-  adv->setManufacturerData(std::string(reinterpret_cast<char *>(mfg), sizeof(mfg)));
+  adv->setAdvertisementData(advData);
+  adv->setScanResponseData(scanData);
   adv->start();
 }
 
 void setupBLE() {
   Serial.println("[BLE] init (broadcast-only)...");
-  NimBLEDevice::init(DEVICE_NAME);
-  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+  BLEDevice::init(DEVICE_NAME);
 
-  adv = NimBLEDevice::getAdvertising();
-  adv->addServiceUUID(SERVICE_UUID);
+  adv = BLEDevice::getAdvertising();
   adv->setScanResponse(true);
   // Advertise fast and explicitly so on-air latency is pinned here rather than inherited.
   // (Measured caveat from the foot pedals: the HOST may still only deliver ~1-3 ads/s, so
   // never size consumer timeouts from this interval.)
   adv->setMinInterval(160);   // units of 0.625 ms -> 100 ms
   adv->setMaxInterval(240);   // -> 150 ms
-  NimBLEAdvertisementData scanData;
-  scanData.setName(DEVICE_NAME);
-  adv->setScanResponseData(scanData);
 
-  publishAdvertising();
+  publishAdvertising();       // sets both payloads and starts advertising
   Serial.println("[BLE] advertising as " DEVICE_NAME " (no connection needed)");
 }
 

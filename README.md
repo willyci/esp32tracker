@@ -77,7 +77,7 @@ both**.
 | Fluoro pedal | [`left-foot/`](firmware/left-foot/) | `Left Foot Pedal` | **hold** = X-ray on (broadcast) |
 | Capture pedal | [`right-foot/`](firmware/right-foot/) | `Right Foot Pedal` | press = one X-ray capture (broadcast) |
 | DSA pedal | [`dsa-foot/`](firmware/dsa-foot/) | `DSA Foot Pedal` | **hold** = contrast run (broadcast) |
-| Pedal panel | [`pedal-panel/`](firmware/pedal-panel/) | `Pedal Panel` | touchscreen replacing all three pedals (broadcast) |
+| Pedal panel | [`pedal-panel/`](firmware/pedal-panel/) | `Pedal Panel` | touchscreen replacing all three pedals (broadcast) — **needs core 3.3.11, not 2.0.17** |
 
 A Mini tracker is a drop-in alternative for a hand slot — the dashboard and app accept either name
 for the same hand, over the identical 32-byte packet.
@@ -154,6 +154,13 @@ safe: a few seconds of radio silence ends the run / turns X-ray off rather than 
 Open the board's own sketch folder and upload it (Arduino IDE, or `arduino-cli upload -p PORT
 --fqbn ... firmware/<folder>`). Toolchain is pinned: **ESP32 core 2.0.17** (3.x crashes with
 NimBLE) and **NimBLE-Arduino 1.4.x** (not 2.x), USB CDC On Boot enabled, 115200 baud.
+
+> **Two different cores.** Every board here needs **core 2.0.17** (NimBLE 1.4.x crashes on 3.x)
+> *except* the AMOLED pedal panel, which needs **core 3.3.11** — Waveshare's stated version, and
+> the only one with the `ESP_I2S.h` audio API. Switch the core in Boards Manager when you move
+> between them, and re-check **USB CDC On Boot** afterwards: a core change resets it. The panel
+> deliberately uses the *core-bundled* BLE library rather than NimBLE, so you only ever swap the
+> core and never the library (the library version is shared across the whole sketchbook).
 
 > **Flash the sketch you think you're flashing.** Arduino uploads the *focused editor tab*, not the
 > file you last opened — swapping the USB cable without switching tabs silently flashes the same
