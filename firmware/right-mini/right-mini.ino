@@ -337,18 +337,48 @@ void calibrateGyro() {
   display.drawStr(0, 26, "STILL...");
   display.sendBuffer();
 
-  const int samples = 300;                 // ~1.5 s at 5 ms/sample
+  // Bounded three ways, because a flaky IMU used to leave this screen up for ~30 s with no
+  // hint anything was wrong: each failed read burns two 50 ms I2C timeouts, 300 times over.
+  const int      WANTED   = 300;           // ~1.5 s at 5 ms/sample when healthy
+  const int      MAX_BAD  = 20;            // consecutive failures = the IMU has gone away
+  const uint32_t DEADLINE = millis() + 4000;   // hard cap; never stare longer than this
+
   double sum[3] = { 0, 0, 0 };
-  for (int i = 0; i < samples; i++) {
+  int good = 0, badRun = 0;
+  for (int i = 0; i < WANTED && millis() < DEADLINE; i++) {
     float ax, ay, az, gx, gy, gz;
     if (mpuReadMotion(&ax, &ay, &az, &gx, &gy, &gz)) {
       sum[0] += gx; sum[1] += gy; sum[2] += gz;
+      good++; badRun = 0;
+    } else if (++badRun >= MAX_BAD) {
+      Serial.println("[IMU] IMU stopped answering during calibration — aborting");
+      break;
     }
     delay(5);
   }
-  for (int i = 0; i < 3; i++) gyroBias[i] = (float)(sum[i] / samples);
-  Serial.printf("[IMU] gyro bias (rad/s): %+.4f %+.4f %+.4f\n",
-                gyroBias[0], gyroBias[1], gyroBias[2]);
+
+  if (good == 0) {
+    // Nothing read at all: integrating from here would just produce garbage, so run as a
+    // SoftPot + buttons board instead and say so.
+    imuOK = false;
+    gyroBias[0] = gyroBias[1] = gyroBias[2] = 0;
+    Serial.println("[IMU] calibration FAILED (no samples) — continuing without orientation");
+    display.clearBuffer();
+    display.setFont(u8g2_font_6x10_tr);
+    display.drawStr(0, 14, "CAL FAIL");
+    display.drawStr(0, 26, "no IMU?");
+    display.sendBuffer();
+    delay(1500);
+    return;
+  }
+
+  // Divide by the samples we ACTUALLY got — dividing by WANTED after partial failures
+  // silently scaled the bias down and left a drifting cube looking like a tuning problem.
+  for (int i = 0; i < 3; i++) gyroBias[i] = (float)(sum[i] / good);
+  Serial.printf("[IMU] gyro bias (rad/s): %+.4f %+.4f %+.4f  (%d/%d samples)\n",
+                gyroBias[0], gyroBias[1], gyroBias[2], good, WANTED);
+  if (good < WANTED / 2)
+    Serial.println("[IMU] WARNING: many reads failed — bias is rough, expect faster drift");
 }
 
 // One integration step. Quaternion q is updated by the small rotation the gyro measured
