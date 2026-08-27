@@ -39,8 +39,8 @@ CHAR_UUID    = "4f7a0002-9b3e-4c2a-8d1f-0a1b2c3d4e5f"
 # a drop-in alternative for a hand slot, and its second button reports X-ray captures by
 # flipping byte 28 (the calib slot — a Mini has no BNO-style calibration status to put there).
 DEVICE_ALIASES = {   # CONNECTED devices (hand slots) — these run a GATT server
-    "left":       ("Left Hand Tracker",  "Left Mini Tracker"),
-    "right":      ("Right Hand Tracker", "Right Mini Tracker"),
+    "left":       ("Left Hand Tracker",  "Left Mini Tracker",  "Left Panel Tracker"),
+    "right":      ("Right Hand Tracker", "Right Mini Tracker", "Right Panel Tracker"),
 }
 # BROADCAST-ONLY devices (no connection, no GATT): state comes from manufacturer data
 # [0xFF, 0xFF, count, level(, flags)] in their advertisements. See firmware/left-foot.
@@ -50,8 +50,13 @@ PEDAL_ALIASES = {
     "dsa-foot":   ("DSA Foot Pedal",),     # level = DSA contrast run in progress
     # The touchscreen panel replaces all three pedals with one device, so its `level` byte
     # is a BITFIELD rather than a single flag. Same 5-byte manufacturer-data shape.
-    "panel":      ("Pedal Panel",),        # bit0 = X-ray held, bit1 = DSA run; count = captures
 }
+# The touchscreen panel is a CONNECTED hand-slot tracker (it replaces a hand rather than
+# adding a device, so the connection budget is unchanged and it can stream at 50 Hz — a
+# broadcaster is only delivered at ~1-3 ads/s, which would step its cube along). It fills a
+# hand slot AND carries the three pedal controls inside the same 32-byte packet:
+#   byte 28 (calib)  = capture COUNT
+#   byte 31 (xrayOn) = LEVEL BITFIELD, bit0 X-ray held, bit1 DSA run (not a flip)
 PANEL_LEVEL_XRAY = 0x01
 PANEL_LEVEL_DSA  = 0x02
 ALL_ALIASES = {**DEVICE_ALIASES, **PEDAL_ALIASES}
@@ -124,9 +129,11 @@ busy: set[str] = set()                    # devices currently connecting/connect
 websockets: set[web.WebSocketResponse] = set()
 
 
-def on_packet(dev: str, data: bytearray, mini: bool = False) -> None:
+def on_packet(dev: str, data: bytearray, mini: bool = False, panel: bool = False) -> None:
     """One 32-byte notification from a CONNECTED hand tracker (pedals never get here)."""
-    global latched_xray, capture_count
+    # panel_xray/panel_dsa MUST be declared here: the panel path below assigns them, and
+    # without this they would silently become locals and never reach xray_on().
+    global latched_xray, capture_count, panel_xray, panel_dsa
     if len(data) < PACKET.size:
         return
     w, x, y, z, ax, ay, az, calib, tStart, tCur, xrayBit = PACKET.unpack(bytes(data[:PACKET.size]))
@@ -139,6 +146,29 @@ def on_packet(dev: str, data: bytearray, mini: bool = False) -> None:
             capture_count += 1
             print(f"[capture] {dev} mini button -> X-RAY CAPTURE #{capture_count}")
         calib = 0   # don't show the flip bit as a calibration value
+    # The PANEL is different from every other connected board: its byte 31 is a live LEVEL
+    # bitfield from two hold-buttons, not a flip, and byte 28 is a capture counter.
+    if panel:
+        held = bool(xrayBit & PANEL_LEVEL_XRAY)
+        run = bool(xrayBit & PANEL_LEVEL_DSA)
+        if held != panel_xray:
+            panel_xray = held
+            print(f"[xray] panel X-ray {'DOWN' if held else 'UP'} -> X-RAY "
+                  f"{'ON' if xray_on() else 'OFF'}")
+        if run != panel_dsa:
+            panel_dsa = run
+            print(f"[dsa] panel contrast run {'START' if run else 'END'} -> X-RAY "
+                  f"{'ON' if xray_on() else 'OFF'}")
+        if calib != last_capture_bit[dev]:
+            last_capture_bit[dev] = calib
+            capture_count += 1
+            print(f"[capture] panel -> X-RAY CAPTURE #{capture_count}")
+        calib = 0                      # not a calibration value; don't show it as one
+        state[dev].update(w=w, x=x, y=y, z=z, ax=ax, ay=ay, az=az, calib=calib,
+                          touchStart=tStart, touchCurrent=tCur,
+                          touchActive=1 if tCur > 0 else 0)
+        return
+
     # A hand board flips byte 31 on each X-ray button click → TOGGLE the latched state.
     if xrayBit != last_xray_bit[dev]:
         last_xray_bit[dev] = xrayBit
@@ -160,7 +190,7 @@ def on_pedal_ad(pedal: str, mfg_data: dict[int, bytes], now: float) -> None:
                    a changed `count` numbers the runs; `flags` bit0 = switch wiring fault.
     """
     global foot_xray, panel_xray, foot_dsa, panel_dsa
-    global capture_count, dsa_runs, dsa_fault
+    global capture_count, dsa_runs, dsa_fault, latched_xray
     payload = mfg_data.get(0xFFFF)
     if not payload:
         return
@@ -247,7 +277,7 @@ def expire_stale_pedals(now: float) -> None:
             if pedal == "dsa-foot" and foot_dsa:
                 foot_dsa = False
                 print(f"[dsa] pedal silent {silent:.1f}s mid-run -> run ENDED, X-RAY OFF (fail-safe)")
-            if pedal == "panel":
+            if pedal == "__unused_panel__":
                 # The panel owns BOTH levels, so a lost panel must clear both.
                 if panel_xray or panel_dsa:
                     panel_xray = panel_dsa = False
@@ -263,12 +293,12 @@ def expire_stale_pedals(now: float) -> None:
             print(f"[{pedal}] broadcast lost — will re-detect")
 
 
-async def serve_device(dev: str, device, mini: bool = False) -> None:
+async def serve_device(dev: str, device, mini: bool = False, panel: bool = False) -> None:
     """Hold the connection to one board, route its notifications, retry on drop."""
     disconnected = asyncio.Event()
     try:
         async with BleakClient(device, disconnected_callback=lambda _: disconnected.set()) as client:
-            await client.start_notify(CHAR_UUID, lambda _, data: on_packet(dev, data, mini))
+            await client.start_notify(CHAR_UUID, lambda _, data: on_packet(dev, data, mini, panel))
             state[dev]["connected"] = True
             print(f"[{dev}] connected: {device.name or device.address}")
             await disconnected.wait()
@@ -303,7 +333,8 @@ def on_advertisement(device, adv) -> None:
     for dev, aliases in DEVICE_ALIASES.items():
         if dev not in busy and any(a in name for a in aliases):
             busy.add(dev)
-            asyncio.create_task(serve_device(dev, device, mini="Mini" in name))
+            asyncio.create_task(serve_device(dev, device, mini="Mini" in name,
+                                                         panel="Panel" in name))
             return
 
 

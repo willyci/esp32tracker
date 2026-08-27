@@ -1,18 +1,17 @@
-// ESP32-S3-Touch-AMOLED-2.06 → BLE BROADCAST touchscreen pedal panel.
+// ESP32-S3-Touch-AMOLED-2.06 → CONNECTED hand-slot tracker + touchscreen pedal panel.
 //
-// Replaces the three foot pedals (X-ray / DSA / capture) with one touchscreen: three
-// full-width buttons on a 410x502 AMOLED, with LRA haptics and a speaker click. Also
-// carries a SoftPot strip, so one board covers the floor controls and a touch input.
+// One device doing two jobs: the three foot-pedal controls (X-ray / DSA / capture) as
+// full-width buttons on a 410x502 AMOLED, plus a real hand tracker — QMI8658 orientation
+// and a SoftPot strip — so it fills a HAND SLOT in place of a Mini.
 //
-// WHY BROADCAST, NOT CONNECT: Vision Pro has a small BLE connection budget — with the two
-// hand trackers connected it refuses more (CBError 11). So, exactly like the foot-pedal sketches,
-// this panel never holds a connection: it ADVERTISES its state and consumers read it out
-// of a continuous scan.
-//
-// CONSEQUENCE YOU CAN SEE ON SCREEN: a broadcaster cannot know whether anyone is
-// listening. The status screen therefore reports that we are ADVERTISING, not that we are
-// "connected", and the hop to the button screen is a 15 s timer from boot rather than a
-// connection event. The ready chime likewise plays when advertising starts.
+// WHY CONNECTED, when the foot pedals are deliberately connectionless: because this board
+// REPLACES a hand rather than adding a device, the Vision Pro connection budget is
+// unchanged (still two), so there is no CBError 11 risk. And connecting is the only way to
+// get smooth orientation: broadcast advertisements are delivered by the host at only
+// ~1-3 per second (measured — see the foot-pedal notes), which would step a cube along at
+// 1-3 Hz. As a GATT peripheral it streams the standard 32-byte packet at 50 Hz like every
+// other tracker, and it genuinely KNOWS when a central is connected, so the status screen
+// reports real connection state and hands over to the buttons on connect.
 //
 // WIRING — only ONE GPIO is claimed; everything else rides the board's own buses:
 //   SoftPot  V+→3V3  GND→GND  wiper→IO19    (ADC2_CH8)
@@ -59,6 +58,9 @@
 
 #include "XPowersLib.h"
 #include <BLEDevice.h>          // core-bundled BLE — deliberately NOT NimBLE, see below
+#include <BLEServer.h>
+#include <BLE2902.h>            // CCCD, so a central can subscribe to notifications
+#include "SensorQMI8658.hpp"    // onboard 6-axis IMU (SensorLib, bundled by Waveshare)
 #include <Adafruit_DRV2605.h>
 
 #include "ESP_I2S.h"
@@ -84,22 +86,38 @@ static constexpr int      VOICE_VOLUME  = 85;     // 0-100
 static constexpr int      I2C_NUM       = 0;      // Wire's port; es8311 shares it
 
 // ---- BLE identifiers — service UUID must match the app's scan filter ----
-#define SERVICE_UUID  "4F7A0001-9B3E-4C2A-8D1F-0A1B2C3D4E5F"
-#define DEVICE_NAME   "Pedal Panel"
+#define SERVICE_UUID       "4F7A0001-9B3E-4C2A-8D1F-0A1B2C3D4E5F"
+#define ORIENTATION_UUID   "4F7A0002-9B3E-4C2A-8D1F-0A1B2C3D4E5F"
 
-// Manufacturer data, deliberately the SAME 5-byte shape the foot pedals use so consumers
-// need only a small addition: [0xFF, 0xFF, captureCount, levelBits, flags].
-//   [2] captureCount — increments once per CAPTURE tap (wraps 0-255; consumers watch for change)
-//   [3] levelBits    — LIVE LEVELS: bit0 = X-ray held, bit1 = DSA held
-//   [4] flags        — reserved, 0
-static constexpr uint8_t MFG_ID_LO = 0xFF;
-static constexpr uint8_t MFG_ID_HI = 0xFF;
+// ---- Which hand slot does this panel fill? ----  1 = left, 0 = right
+#define PANEL_IS_LEFT 1
+#if PANEL_IS_LEFT
+  #define DEVICE_NAME "Left Panel Tracker"
+  #define HAND_LABEL  "LEFT"
+#else
+  #define DEVICE_NAME "Right Panel Tracker"
+  #define HAND_LABEL  "RIGHT"
+#endif
+
+// ---- The standard 32-byte tracker packet (see ../../SPEC.md) ----
+// Identical layout to the hand trackers and Minis, so this board drops into a hand slot.
+// Two fields carry the pedal controls, extending the Mini convention by one bit:
+//   calib  (byte 28) — CAPTURE COUNT, increments per tap (Minis already repurpose this)
+//   xrayOn (byte 31) — LEVEL BITFIELD: bit0 = X-ray held, bit1 = DSA run. NOT a flip:
+//                      these are hold controls, so consumers read the bits directly.
+struct __attribute__((packed)) OrientationPacket {
+  float   w, x, y, z;     // orientation, integrated from the QMI8658 gyro
+  float   ax, ay, az;     // accel, m/s^2
+  uint8_t calib;          // capture count
+  uint8_t touchStart;     // SoftPot position where the touch began (0 = no touch)
+  uint8_t touchCurrent;   // current SoftPot position while touched (0 = no touch)
+  uint8_t xrayOn;         // level bitfield, see above
+};
+static_assert(sizeof(OrientationPacket) == 32, "packet must be 32 bytes");
+static OrientationPacket pkt = { 1, 0, 0, 0,  0, 0, 0,  0, 0, 0, 0 };
+
 static constexpr uint8_t LEVEL_XRAY = 0x01;
 static constexpr uint8_t LEVEL_DSA  = 0x02;
-
-static uint8_t captureCount = 0;
-static uint8_t levelBits    = 0;
-static uint8_t mfgFlags     = 0;
 
 // Accumulated held-time, shown on the buttons. Local to the panel — a consumer can derive
 // the same thing from the levels, so it is not worth spending broadcast bytes on.
@@ -139,10 +157,30 @@ XPowersPMU power;
 Adafruit_DRV2605 drv;
 static bool hapticsOK = false;
 
+// ---- IMU: QMI8658, gyro integrated on-chip here ----
+// Same approach and the same verified integration math as firmware/left-mini: this is a
+// 6-axis part with no magnetometer, so it does no fusion of its own. Roll/pitch would be
+// gravity-correctable, yaw is not, and everything drifts slowly. A bias calibration at
+// boot and a deadband keep it usable; re-center in the app.
+SensorQMI8658 qmi;
+static bool imuOK = false;
+
+static constexpr uint32_t IMU_HZ          = 100;
+static constexpr uint32_t IMU_INTERVAL_MS = 1000 / IMU_HZ;
+static constexpr float    IMU_DT          = 1.0f / (float)IMU_HZ;
+static uint32_t lastImuMs = 0;
+
+static float gyroBias[3] = { 0, 0, 0 };
+static constexpr float GYRO_DEADBAND_DPS = 0.7f;   // below this, treat the board as still
+static constexpr float DEG2RAD_F = 0.01745329252f;
+static constexpr float G_MPS2    = 9.80665f;
+
 I2SClass i2s;
 static bool audioOK = false;
 
-BLEAdvertising *adv = nullptr;
+BLECharacteristic *orientationChar = nullptr;
+volatile bool deviceConnected = false;
+volatile bool connectChimePending = false;
 
 // LVGL objects we update later
 static lv_obj_t *scrStatus = nullptr, *scrButtons = nullptr;
@@ -153,45 +191,41 @@ static lv_obj_t *lblXray = nullptr, *lblDsa = nullptr, *lblCapture = nullptr;
 // ---------------------------------------------------------------------------
 // BLE broadcast
 // ---------------------------------------------------------------------------
-// Rebuild the whole advertisement so the current state goes out on the air.
-//
-// The payload is assembled by hand rather than letting the library auto-generate it,
-// because setAdvertisementData() REPLACES the auto payload — and the visionOS app scans
-// with a service filter, so the 128-bit UUID has to be in there or the headset is blind
-// to us. Budget: flags 3 + 128-bit UUID 18 + manufacturer data 7 = 28 of 31 bytes.
-// The device NAME lives in the scan response (it would not fit alongside the UUID).
-void publishAdvertising() {
-  uint8_t mfg[5] = { MFG_ID_LO, MFG_ID_HI, captureCount, levelBits, mfgFlags };
-
-  BLEAdvertisementData advData;
-  advData.setFlags(0x06);                       // LE General Discoverable, BR/EDR not supported
-  advData.setCompleteServices(BLEUUID(SERVICE_UUID));
-  // String(ptr, len) — the length-taking ctor, since this payload contains NUL bytes.
-  advData.setManufacturerData(String(reinterpret_cast<const char *>(mfg), sizeof(mfg)));
-
-  BLEAdvertisementData scanData;
-  scanData.setName(DEVICE_NAME);
-
-  adv->stop();
-  adv->setAdvertisementData(advData);
-  adv->setScanResponseData(scanData);
-  adv->start();
-}
+// A central connected/disconnected. Advertising is restarted on disconnect so the
+// dashboard or headset can pick us up again without a power cycle.
+class ServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer *) override {
+    deviceConnected = true;
+    connectChimePending = true;   // the tone is blocking, so the loop plays it, not us
+    Serial.println(">> central CONNECTED");
+  }
+  void onDisconnect(BLEServer *) override {
+    deviceConnected = false;
+    Serial.println(">> central DISCONNECTED — re-advertising");
+    BLEDevice::startAdvertising();
+  }
+};
 
 void setupBLE() {
-  Serial.println("[BLE] init (broadcast-only)...");
+  Serial.println("[BLE] init (GATT peripheral)...");
   BLEDevice::init(DEVICE_NAME);
 
-  adv = BLEDevice::getAdvertising();
-  adv->setScanResponse(true);
-  // Advertise fast and explicitly so on-air latency is pinned here rather than inherited.
-  // (Measured caveat from the foot pedals: the HOST may still only deliver ~1-3 ads/s, so
-  // never size consumer timeouts from this interval.)
-  adv->setMinInterval(160);   // units of 0.625 ms -> 100 ms
-  adv->setMaxInterval(240);   // -> 150 ms
+  BLEServer *server = BLEDevice::createServer();
+  server->setCallbacks(new ServerCallbacks());
 
-  publishAdvertising();       // sets both payloads and starts advertising
-  Serial.println("[BLE] advertising as " DEVICE_NAME " (no connection needed)");
+  BLEService *service = server->createService(SERVICE_UUID);
+  orientationChar = service->createCharacteristic(ORIENTATION_UUID,
+                                                  BLECharacteristic::PROPERTY_NOTIFY);
+  orientationChar->addDescriptor(new BLE2902());   // lets the central subscribe
+  service->start();
+
+  // Default payload generation: service UUID in the advertisement, name in the scan
+  // response (the 128-bit UUID plus this name would not fit in one 31-byte PDU).
+  BLEAdvertising *adv = BLEDevice::getAdvertising();
+  adv->addServiceUUID(SERVICE_UUID);
+  adv->setScanResponse(true);
+  adv->start();
+  Serial.println("[BLE] advertising as " DEVICE_NAME);
 }
 
 // ---------------------------------------------------------------------------
@@ -270,20 +304,101 @@ void pressFeedback(uint8_t effect = 1) {
 // ---------------------------------------------------------------------------
 static float softpotEMA = 0;
 static bool  touching = false;
-static uint8_t touchStart = 0, touchCurrent = 0;
 static int lastSoftPotRaw = 0;
 
 void readSoftPot() {
   int raw = analogRead(PIN_SOFTPOT);
   lastSoftPotRaw = raw;
   if (raw < SOFTPOT_NOTOUCH_RAW) {
-    touching = false; touchStart = 0; touchCurrent = 0; softpotEMA = 0;
+    touching = false; pkt.touchStart = 0; pkt.touchCurrent = 0; softpotEMA = 0;
     return;
   }
   uint8_t pos = (uint8_t)constrain(map(raw, SOFTPOT_NOTOUCH_RAW, 4095, 1, 255), 1, 255);
-  if (!touching) { touching = true; touchStart = pos; softpotEMA = pos; }
+  if (!touching) { touching = true; pkt.touchStart = pos; softpotEMA = pos; }
   else           { softpotEMA = 0.6f * softpotEMA + 0.4f * pos; }
-  touchCurrent = (uint8_t)softpotEMA;
+  pkt.touchCurrent = (uint8_t)softpotEMA;
+}
+
+// ---------------------------------------------------------------------------
+// IMU — gyro integration, transcribed from firmware/left-mini (where the math was
+// checked numerically: 90 deg/s for 1 s gives 89.998 deg about each axis with the
+// correct axis sign, and the deadband holds 0 deg over 60 s of residual bias).
+// ---------------------------------------------------------------------------
+bool imuRead(float *ax, float *ay, float *az, float *gx, float *gy, float *gz) {
+  if (!qmi.getDataReady()) return false;
+  float a[3], g[3];
+  if (!qmi.getAccelerometer(a[0], a[1], a[2])) return false;   // g
+  if (!qmi.getGyroscope(g[0], g[1], g[2])) return false;       // deg/s
+  *ax = a[0]; *ay = a[1]; *az = a[2];
+  *gx = g[0]; *gy = g[1]; *gz = g[2];
+  return true;
+}
+
+// Average the gyro while the board sits still; that average IS the bias. Bounded the same
+// three ways as the Mini's version, so a sulking IMU cannot park us on this screen.
+void calibrateGyro() {
+  Serial.println("[IMU] calibrating gyro bias — HOLD STILL...");
+  // NB: this runs BEFORE lv_init(), so there is no LVGL yet — and unlike the Minis this
+  // board has no U8g2 "display" object at all. Draw straight onto the panel with GFX.
+  gfx->fillScreen(RGB565_BLACK);
+  gfx->setTextColor(RGB565_WHITE);
+  gfx->setTextSize(4);
+  gfx->setCursor(60, 200);
+  gfx->print("HOLD");
+  gfx->setCursor(60, 250);
+  gfx->print("STILL...");
+
+  const int      WANTED   = 300;
+  const int      MAX_BAD  = 60;                  // getDataReady() can legitimately say no
+  const uint32_t DEADLINE = millis() + 4000;
+  double sum[3] = { 0, 0, 0 };
+  int good = 0, badRun = 0;
+  while (good < WANTED && millis() < DEADLINE) {
+    float ax, ay, az, gx, gy, gz;
+    if (imuRead(&ax, &ay, &az, &gx, &gy, &gz)) {
+      sum[0] += gx; sum[1] += gy; sum[2] += gz;
+      good++; badRun = 0;
+    } else if (++badRun >= MAX_BAD) {
+      Serial.println("[IMU] no data during calibration — aborting");
+      break;
+    }
+    delay(2);
+  }
+  if (good == 0) {
+    imuOK = false;
+    Serial.println("[IMU] calibration FAILED — running without orientation");
+    return;
+  }
+  for (int i = 0; i < 3; i++) gyroBias[i] = (float)(sum[i] / good);   // divide by REAL count
+  Serial.printf("[IMU] gyro bias (deg/s): %+.3f %+.3f %+.3f  (%d/%d samples)\n",
+                gyroBias[0], gyroBias[1], gyroBias[2], good, WANTED);
+}
+
+// One integration step: q += 0.5 * q (x) omega * dt, renormalised.
+void updateIMU() {
+  float rax, ray, raz, rgx, rgy, rgz;
+  if (!imuRead(&rax, &ray, &raz, &rgx, &rgy, &rgz)) return;
+
+  float gx = rgx - gyroBias[0];                  // deg/s, de-biased
+  float gy = rgy - gyroBias[1];
+  float gz = rgz - gyroBias[2];
+  if (fabsf(gx) < GYRO_DEADBAND_DPS) gx = 0;     // a still board must not creep
+  if (fabsf(gy) < GYRO_DEADBAND_DPS) gy = 0;
+  if (fabsf(gz) < GYRO_DEADBAND_DPS) gz = 0;
+  gx *= DEG2RAD_F; gy *= DEG2RAD_F; gz *= DEG2RAD_F;
+
+  float qw = pkt.w, qx = pkt.x, qy = pkt.y, qz = pkt.z;
+  const float h = 0.5f * IMU_DT;
+  float nw = qw + (-qx * gx - qy * gy - qz * gz) * h;
+  float nx = qx + ( qw * gx + qy * gz - qz * gy) * h;
+  float ny = qy + ( qw * gy - qx * gz + qz * gx) * h;
+  float nz = qz + ( qw * gz + qx * gy - qy * gx) * h;
+
+  float norm = sqrtf(nw * nw + nx * nx + ny * ny + nz * nz);
+  if (norm > 1e-6f) {
+    pkt.w = nw / norm; pkt.x = nx / norm; pkt.y = ny / norm; pkt.z = nz / norm;
+  }
+  pkt.ax = rax * G_MPS2; pkt.ay = ray * G_MPS2; pkt.az = raz * G_MPS2;   // packet wants m/s^2
 }
 
 // ---------------------------------------------------------------------------
@@ -333,15 +448,13 @@ static void back_cb(lv_event_t *e) {
 static void xray_cb(lv_event_t *e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_PRESSED) {
-    levelBits |= LEVEL_XRAY;
+    pkt.xrayOn |= LEVEL_XRAY;
     xraySinceMs = millis();
     pressFeedback(1);
-    publishAdvertising();
     Serial.println(">> X-RAY down");
   } else if (code == LV_EVENT_RELEASED) {
-    levelBits &= ~LEVEL_XRAY;
+    pkt.xrayOn &= ~LEVEL_XRAY;
     if (xraySinceMs) { xrayHeldMs += millis() - xraySinceMs; xraySinceMs = 0; }
-    publishAdvertising();
     Serial.println(">> X-RAY up");
   }
 }
@@ -349,25 +462,22 @@ static void xray_cb(lv_event_t *e) {
 static void dsa_cb(lv_event_t *e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_PRESSED) {
-    levelBits |= LEVEL_DSA;
+    pkt.xrayOn |= LEVEL_DSA;
     dsaSinceMs = millis();
     pressFeedback(1);
-    publishAdvertising();
     Serial.println(">> DSA run START");
   } else if (code == LV_EVENT_RELEASED) {
-    levelBits &= ~LEVEL_DSA;
+    pkt.xrayOn &= ~LEVEL_DSA;
     if (dsaSinceMs) { dsaHeldMs += millis() - dsaSinceMs; dsaSinceMs = 0; }
-    publishAdvertising();
     Serial.println(">> DSA run END");
   }
 }
 
 static void capture_cb(lv_event_t *e) {
   LV_UNUSED(e);
-  captureCount++;
+  pkt.calib++;                      // byte 28 = capture count (Mini convention)
   pressFeedback(1);
-  publishAdvertising();
-  Serial.printf(">> CAPTURE #%u\n", captureCount);
+  Serial.printf(">> CAPTURE #%u\n", pkt.calib);
 }
 
 static lv_obj_t *makePedalButton(lv_obj_t *parent, const char *text, lv_color_t colour,
@@ -465,10 +575,11 @@ static void ui_tick(lv_timer_t *t) {
   uint32_t ds = dsaHeldMs  + (dsaSinceMs  ? millis() - dsaSinceMs  : 0);
   snprintf(buf, sizeof(buf), "X-RAY %us", (unsigned)(xs / 1000));  lv_label_set_text(lblXray, buf);
   snprintf(buf, sizeof(buf), "DSA %us",   (unsigned)(ds / 1000));  lv_label_set_text(lblDsa, buf);
-  snprintf(buf, sizeof(buf), "CAPTURE %u", captureCount);          lv_label_set_text(lblCapture, buf);
+  snprintf(buf, sizeof(buf), "CAPTURE %u", pkt.calib);          lv_label_set_text(lblCapture, buf);
 
   if (lv_scr_act() == scrStatus) {
-    lv_label_set_text(lblBleState, "BLE: advertising as " DEVICE_NAME);
+    lv_label_set_text(lblBleState, deviceConnected ? "BLE: CONNECTED  (" DEVICE_NAME ")"
+                                                  : "BLE: advertising as " DEVICE_NAME);
     if (power.isBatteryConnect())
       snprintf(buf, sizeof(buf), "Batt: %d%%  %dmV", power.getBatteryPercent(),
                power.getBattVoltage());
@@ -479,18 +590,21 @@ static void ui_tick(lv_timer_t *t) {
     snprintf(buf, sizeof(buf), "I2C: %s%s", i2cSummary, hapticsOK ? "(LRA ok)" : "(no LRA)");
     lv_label_set_text(lblI2C, buf);
 
-    if (touchCurrent > 0)
-      snprintf(buf, sizeof(buf), "SoftPot: %u  (raw %d)", touchCurrent, lastSoftPotRaw);
+    if (pkt.touchCurrent > 0)
+      snprintf(buf, sizeof(buf), "SoftPot: %u  (raw %d)", pkt.touchCurrent, lastSoftPotRaw);
     else
       snprintf(buf, sizeof(buf), "SoftPot: -- (raw %d)", lastSoftPotRaw);
     lv_label_set_text(lblSoftPot, buf);
 
-    if (!autoSwitchDone) {
-      uint32_t left = (AUTO_SWITCH_MS - (millis() - bootMs)) / 1000;
-      snprintf(buf, sizeof(buf), "Pedals in %us...", (unsigned)left + 1);
-      lv_label_set_text(lblCountdown, buf);
-    } else {
+    if (autoSwitchDone) {
       lv_label_set_text(lblCountdown, "");
+    } else if (!deviceConnected) {
+      lv_label_set_text(lblCountdown, "Waiting for a central...");
+    } else {
+      uint32_t up = millis() - bootMs;
+      uint32_t left = up >= AUTO_SWITCH_MS ? 0 : (AUTO_SWITCH_MS - up) / 1000 + 1;
+      snprintf(buf, sizeof(buf), "Pedals in %us...", (unsigned)left);
+      lv_label_set_text(lblCountdown, buf);
     }
   }
 }
@@ -563,6 +677,23 @@ void setup() {
     Serial.println("[HAPTIC] DRV2605L NOT found at 0x5A — running without haptics");
   }
 
+  // IMU. Optional at runtime: a dead QMI8658 should still leave a working pedal panel.
+  imuOK = qmi.begin(Wire, QMI8658_L_SLAVE_ADDRESS, IIC_SDA, IIC_SCL);
+  if (imuOK) {
+    qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_1000Hz,
+                            SensorQMI8658::LPF_MODE_0);
+    qmi.configGyroscope(SensorQMI8658::GYR_RANGE_512DPS, SensorQMI8658::GYR_ODR_224_2Hz,
+                        SensorQMI8658::LPF_MODE_0);
+    qmi.enableAccelerometer();
+    qmi.enableGyroscope();
+    Serial.println("[IMU] QMI8658 ready");
+    calibrateGyro();
+    lastImuMs = millis();
+  } else {
+    Serial.println("[IMU] QMI8658 NOT found — running without orientation "
+                   "(quaternion stays identity; buttons and SoftPot still work)");
+  }
+
   // Battery telemetry (display rails are already on; the PMU is only read here).
   power.enableBattDetection();
   power.enableBattVoltageMeasure();
@@ -622,7 +753,6 @@ void setup() {
   lv_timer_create(ui_tick, 250, NULL);
 
   setupBLE();
-  soundReady();                                   // "BLE is up" chime — see the note on top
 
   bootMs = millis();
   Serial.println("=== setup complete ===");
@@ -637,15 +767,31 @@ void loop() {
 
   const uint32_t now = millis();
 
-  static uint32_t lastSoftPotMs = 0;
-  if (now - lastSoftPotMs >= 20) {                // 50 Hz, same cadence as the trackers
-    lastSoftPotMs = now;
-    readSoftPot();
+  // Integrate the gyro on a fixed 100 Hz cadence (faster than the notify, so what goes
+  // out is always fresh).
+  if (imuOK && (now - lastImuMs >= IMU_INTERVAL_MS)) {
+    lastImuMs += IMU_INTERVAL_MS;                 // fixed step: dt stays exactly IMU_DT
+    if (now - lastImuMs > 5 * IMU_INTERVAL_MS) lastImuMs = now;   // resync after a stall
+    updateIMU();
   }
 
-  // Status -> buttons once the panel has been up for AUTO_SWITCH_MS. There is no
-  // connection to wait for (see the header note), so this is purely a timer.
-  if (!autoSwitchDone && (now - bootMs >= AUTO_SWITCH_MS)) showButtons();
+  static uint32_t lastNotifyMs = 0;
+  if (now - lastNotifyMs >= 20) {                 // 50 Hz, same cadence as the trackers
+    lastNotifyMs = now;
+    readSoftPot();
+    if (deviceConnected && orientationChar) {
+      orientationChar->setValue(reinterpret_cast<uint8_t *>(&pkt), sizeof(pkt));
+      orientationChar->notify();
+    }
+  }
+
+  // Chime once, from here rather than the BLE callback (playTone blocks).
+  if (connectChimePending) { connectChimePending = false; soundReady(); }
+
+  // Hand over to the buttons 15 s after boot, but only once a central is actually
+  // connected — as specified. With nothing connected there is nothing to drive, so the
+  // status screen stays up; tap it to go to the buttons anyway.
+  if (!autoSwitchDone && deviceConnected && (now - bootMs >= AUTO_SWITCH_MS)) showButtons();
 
   delay(5);
 }
