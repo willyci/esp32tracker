@@ -139,6 +139,22 @@ enum PanelMode : uint8_t { MODE_PEDAL, MODE_TRACKER };
 static PanelMode panelMode = MODE_PEDAL;
 static uint32_t lastWakePollMs = 0;
 
+// What TRACKER mode does with the panel. Either way LVGL stops and no frames are pushed,
+// so the CPU/QSPI saving is identical — the choice is only about the glass:
+//   0 = FREEZE (default). The last frame stays visible. This works because the CO5300 has
+//       its own GRAM and self-refreshes the panel from it, so an image needs no host
+//       activity to persist. Costs the panel's pixel current, but the screen stays
+//       readable — you can see what mode the board is in.
+//   1 = POWER DOWN via displayOff(). Darkest and lowest current, but the screen is blank
+//       and gives no clue why.
+#define TRACKER_SCREEN_OFF 0
+
+// Only used when freezing: dim the panel to save some current while keeping it readable
+// (0-255; 0 = leave brightness alone). Pixel current dominates on an AMOLED, and the frozen
+// notice is mostly black already, so this is a small win — set it if you want one.
+#define TRACKER_DIM_BRIGHTNESS 0
+#define NORMAL_BRIGHTNESS 255
+
 static constexpr uint32_t AUTO_SWITCH_MS = 15000;  // status -> buttons, if not cancelled
 static uint32_t bootMs = 0;
 static bool autoSwitchDone = false;                // also set when the user hits BACK
@@ -454,16 +470,28 @@ void i2cScan() {
 // LVGL — LVGL stops running in this mode) so the screen going dark is not a mystery.
 void enterTrackerMode() {
   panelMode = MODE_TRACKER;
+
+  // Drawn with GFX, not LVGL — LVGL stops running below, so this is the image that will be
+  // left on the glass. It doubles as the mode indicator when the panel is frozen.
   gfx->fillScreen(RGB565_BLACK);
   gfx->setTextColor(RGB565_WHITE);
   gfx->setTextSize(3);
-  gfx->setCursor(40, 200);
+  gfx->setCursor(40, 170);
   gfx->print("TRACKER MODE");
   gfx->setTextSize(2);
+  gfx->setCursor(40, 220);
+  gfx->print(HAND_LABEL " hand - IMU live");
   gfx->setCursor(40, 250);
-  gfx->print("screen off - tap to wake");
-  delay(700);                       // long enough to read
-  gfx->displayOff();                // real AMOLED power saving, not just skipped work
+  gfx->print("tap to wake");
+
+#if TRACKER_SCREEN_OFF
+  delay(700);                       // long enough to read before it goes dark
+  gfx->displayOff();                // blank: lowest current, no clue why
+#elif TRACKER_DIM_BRIGHTNESS > 0
+  gfx->setBrightness(TRACKER_DIM_BRIGHTNESS);   // frozen but dimmed
+#endif
+  // Nothing more is pushed either way: LVGL is not run and frameDirty stays clear, so the
+  // CO5300 just keeps self-refreshing whatever is in its GRAM.
   frameDirty = false;
   lastImuMs = millis();             // fresh dt, so the first step is not a lurch
   lastWakePollMs = millis();
@@ -472,7 +500,11 @@ void enterTrackerMode() {
 
 void enterPedalMode() {
   panelMode = MODE_PEDAL;
+#if TRACKER_SCREEN_OFF
   gfx->displayOn();
+#elif TRACKER_DIM_BRIGHTNESS > 0
+  gfx->setBrightness(NORMAL_BRIGHTNESS);
+#endif
   // Wake onto the STATUS screen, never straight onto the pedals: the tap that woke us is
   // very likely still under a finger, and landing on the button screen would fire X-ray
   // the instant LVGL resumes. One extra tap to reach the pedals is the safe trade.

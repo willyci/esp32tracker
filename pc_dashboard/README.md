@@ -192,11 +192,22 @@ one at a time:
 - **PEDAL mode** (default) — the screen and its touch buttons drive X-ray / DSA / capture.
   IMU integration and the SoftPot are skipped, so the cube **holds its last orientation**
   rather than snapping to identity. Tap **IMU ▶** (top-right of the button screen) to switch.
-- **TRACKER mode** — orientation and SoftPot at full rate with the **AMOLED powered off**
-  (`displayOff`), LVGL not running and no frames pushed. That reclaims ~10 ms per frame of
-  QSPI time plus the panel's current. The buttons are unavailable, so X-ray/DSA/capture hold
-  their last values. **Tap anywhere to wake** — the touch controller is still polled at
-  10 Hz for exactly that.
+- **TRACKER mode** — orientation and SoftPot at full rate, LVGL not running and no frames
+  pushed, which reclaims ~10 ms per frame of QSPI. The buttons are unavailable, so
+  X-ray/DSA/capture hold their last values. **Tap anywhere to wake** — the touch controller
+  is still polled at 10 Hz for exactly that.
+
+  What happens to the glass is a compile-time choice (`TRACKER_SCREEN_OFF` in the sketch),
+  and the CPU/QSPI saving is identical either way:
+
+  | | Screen | Power | Why |
+  |---|---|---|---|
+  | `0` **freeze** (default) | last frame stays visible | panel current only | the CO5300 has its own GRAM and self-refreshes from it, so an image persists with zero host activity — you can still see which mode the board is in |
+  | `1` power down | blank | lowest | `displayOff()`; darkest, but gives no clue why |
+
+  When freezing, `TRACKER_DIM_BRIGHTNESS` can dim the panel to trade a little readability
+  for current. It's a small win: pixel current dominates on an AMOLED and the frozen notice
+  is mostly black already.
 
 Waking always lands on the **status** screen, never straight on the pedals: the tap that
 woke it is probably still under your finger, and landing on the button screen would fire
