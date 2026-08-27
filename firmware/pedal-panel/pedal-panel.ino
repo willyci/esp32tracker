@@ -37,9 +37,9 @@
 //     not work on core 3.x and NimBLE 2.x would then break the 2.0.17 boards, since the
 //     library version is shared across the sketchbook. Using the bundled BLE means you swap
 //     only the core and never the library.
-//   * The advertisement is built by hand (flags + 128-bit service UUID + manufacturer data,
-//     28 of the 31 available bytes) because the visionOS app scans with a SERVICE FILTER —
-//     drop the UUID and the headset never sees this panel.
+//   * Advertising uses the library's default payload: the 128-bit service UUID in the
+//     advertisement (the visionOS app scans with a SERVICE FILTER, so it must be there) and
+//     the device name in the scan response, because the two do not fit in one 31-byte PDU.
 //
 // Board: "ESP32S3 Dev Module", USB CDC On Boot: DISABLED, PSRAM enabled, 115200 baud.
 // Libraries: lvgl 9 + Arduino_GFX + Arduino_DriveBus + XPowersLib (all bundled with the
@@ -134,6 +134,7 @@ static bool autoSwitchDone = false;                // also set when the user hit
 #define DIRECT_RENDER_MODE
 
 uint32_t screenWidth, screenHeight, bufSize;
+static volatile bool frameDirty = false;   // set by my_disp_flush, consumed in loop()
 lv_display_t *disp;
 lv_color_t *disp_draw_buf;
 
@@ -165,9 +166,12 @@ static bool hapticsOK = false;
 SensorQMI8658 qmi;
 static bool imuOK = false;
 
-static constexpr uint32_t IMU_HZ          = 100;
-static constexpr uint32_t IMU_INTERVAL_MS = 1000 / IMU_HZ;
-static constexpr float    IMU_DT          = 1.0f / (float)IMU_HZ;
+// Integrate no faster than this, but ALWAYS over the time that really elapsed. A fixed
+// step would be wrong here: pushing a full 402 KB frame over QSPI costs ~10 ms, so the loop
+// runs at ~65 Hz, and advancing the quaternion by a hard-coded 10 ms per pass made the cube
+// rotate at ~65% of true speed (worse while a click tone blocks the loop).
+static constexpr uint32_t IMU_INTERVAL_MS = 10;      // 100 Hz ceiling
+static constexpr float    IMU_DT_MAX      = 0.25f;   // clamp after a long stall
 static uint32_t lastImuMs = 0;
 
 static float gyroBias[3] = { 0, 0, 0 };
@@ -374,8 +378,8 @@ void calibrateGyro() {
                 gyroBias[0], gyroBias[1], gyroBias[2], good, WANTED);
 }
 
-// One integration step: q += 0.5 * q (x) omega * dt, renormalised.
-void updateIMU() {
+// One integration step over `dt` seconds: q += 0.5 * q (x) omega * dt, renormalised.
+void updateIMU(float dt) {
   float rax, ray, raz, rgx, rgy, rgz;
   if (!imuRead(&rax, &ray, &raz, &rgx, &rgy, &rgz)) return;
 
@@ -388,7 +392,7 @@ void updateIMU() {
   gx *= DEG2RAD_F; gy *= DEG2RAD_F; gz *= DEG2RAD_F;
 
   float qw = pkt.w, qx = pkt.x, qy = pkt.y, qz = pkt.z;
-  const float h = 0.5f * IMU_DT;
+  const float h = 0.5f * dt;
   float nw = qw + (-qx * gx - qy * gy - qz * gz) * h;
   float nx = qx + ( qw * gx + qy * gz - qz * gy) * h;
   float ny = qy + ( qw * gy - qx * gz + qz * gx) * h;
@@ -614,11 +618,15 @@ static void ui_tick(lv_timer_t *t) {
 // ---------------------------------------------------------------------------
 uint32_t millis_cb(void) { return millis(); }
 
+// LVGL tells us here that it rendered. In DIRECT mode we push the whole buffer, but only
+// ONCE per render rather than every loop pass — see frameDirty in loop().
 void my_disp_flush(lv_display_t *d, const lv_area_t *area, uint8_t *px_map) {
 #ifndef DIRECT_RENDER_MODE
   uint32_t w = lv_area_get_width(area);
   uint32_t h = lv_area_get_height(area);
   gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)px_map, w, h);
+#else
+  frameDirty = true;
 #endif
   lv_disp_flush_ready(d);
 }
@@ -762,17 +770,22 @@ void loop() {
   lv_task_handler();
 
 #ifdef DIRECT_RENDER_MODE
-  gfx->draw16bitRGBBitmap(0, 0, (uint16_t *)disp_draw_buf, screenWidth, screenHeight);
+  // Pushing a full frame costs ~10 ms of QSPI, so do it only when LVGL actually drew
+  // something. An idle panel now spends that time on BLE and the IMU instead.
+  if (frameDirty) {
+    frameDirty = false;
+    gfx->draw16bitRGBBitmap(0, 0, (uint16_t *)disp_draw_buf, screenWidth, screenHeight);
+  }
 #endif
 
   const uint32_t now = millis();
 
-  // Integrate the gyro on a fixed 100 Hz cadence (faster than the notify, so what goes
-  // out is always fresh).
+  // Integrate the gyro at up to 100 Hz, over the time that ACTUALLY elapsed.
   if (imuOK && (now - lastImuMs >= IMU_INTERVAL_MS)) {
-    lastImuMs += IMU_INTERVAL_MS;                 // fixed step: dt stays exactly IMU_DT
-    if (now - lastImuMs > 5 * IMU_INTERVAL_MS) lastImuMs = now;   // resync after a stall
-    updateIMU();
+    float dt = (now - lastImuMs) * 0.001f;
+    if (dt > IMU_DT_MAX) dt = IMU_DT_MAX;         // don't lurch after a stall (audio, boot)
+    lastImuMs = now;
+    updateIMU(dt);
   }
 
   static uint32_t lastNotifyMs = 0;
