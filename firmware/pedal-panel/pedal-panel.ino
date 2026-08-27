@@ -53,7 +53,9 @@
 
 #include "Arduino_GFX_Library.h"
 #include "Arduino_DriveBus_Library.h"
-#include "lv_conf.h"
+// NB: no #include "lv_conf.h" here. LVGL pulls its own config in via
+// ../../lv_conf.h (lv_conf_internal.h), and lv_conf.h lives in the libraries
+// ROOT, which is not on the include path — including it directly just fails.
 
 #include "XPowersLib.h"
 #include <BLEDevice.h>          // core-bundled BLE — deliberately NOT NimBLE, see below
