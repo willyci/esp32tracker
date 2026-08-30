@@ -129,10 +129,11 @@ static uint32_t xraySinceMs = 0, dsaSinceMs = 0;   // millis() at the last press
 // one runs at a time:
 //   PEDAL   — screen + touch buttons drive X-ray / DSA / capture. IMU integration and the
 //             SoftPot are skipped; the quaternion simply holds its last value.
-//   TRACKER — orientation + SoftPot at full rate with the AMOLED POWERED DOWN. LVGL is not
-//             run and no frame is pushed, which frees the ~10 ms/frame of QSPI and the
-//             panel's backlight current. The touch controller is still polled at 10 Hz —
-//             one cheap I2C read — purely so a tap can wake the screen back up.
+//   TRACKER — orientation + SoftPot at full rate. LVGL is not run and no frame is pushed,
+//             freeing the ~10 ms/frame of QSPI. By default the last frame is left FROZEN on
+//             the glass (the CO5300 self-refreshes from its own GRAM), so the board still
+//             says what it is doing; TRACKER_SCREEN_OFF=1 blanks it instead. The touch
+//             controller is still polled at 10 Hz — one cheap I2C read — so a tap can wake it.
 // Either way the same 32-byte packet goes out at 50 Hz; only which fields move changes.
 // ---------------------------------------------------------------------------
 enum PanelMode : uint8_t { MODE_PEDAL, MODE_TRACKER };
@@ -188,6 +189,18 @@ void Arduino_IIC_Touch_Interrupt(void) { FT3168->IIC_Interrupt_Flag = true; }
 XPowersPMU power;
 Adafruit_DRV2605 drv;
 static bool hapticsOK = false;
+static bool lraCalibrated = false;
+
+// ---- LRA parameters — SET THESE FROM YOUR ACTUAL LRA'S DATASHEET ----
+// An LRA is a RESONANT device: the DRV2605 drives it closed-loop at its resonant frequency
+// (typically 170-235 Hz), tracking it via back-EMF. It cannot do that until auto-calibration
+// has measured the motor, so an uncalibrated LRA buzzes weakly or barely moves — which is
+// exactly what "LRA mode is set but it feels wrong" looks like.
+// These defaults suit a common ~2 V, ~175 Hz coin LRA. If yours differs, the datasheet
+// values to plug in are rated RMS voltage, maximum (overdrive) voltage and resonant freq.
+static constexpr uint8_t LRA_RATED_VOLTAGE = 0x3F;   // ~2.0 V RMS
+static constexpr uint8_t LRA_OD_CLAMP      = 0x89;   // ~2.7 V peak overdrive
+static constexpr uint8_t LRA_DRIVE_TIME    = 0x13;   // CONTROL1: ~175 Hz (2.4 ms half-period)
 
 // ---- IMU: QMI8658, gyro integrated on-chip here ----
 // Same approach and the same verified integration math as firmware/left-mini: this is a
@@ -321,6 +334,37 @@ void soundReady()  { playTone(880, 70); playTone(1320, 90); }   // two-tone "BLE
 // ---------------------------------------------------------------------------
 // Haptics
 // ---------------------------------------------------------------------------
+// Run the DRV2605's auto-calibration so closed-loop LRA drive actually works. The Adafruit
+// library has no helper for this, but it exposes raw register access, so this is the
+// datasheet procedure: set the motor parameters, enter auto-cal mode, pulse GO, wait for it
+// to clear, then read the pass/fail bit. Takes up to ~1.2 s and runs once at boot — the
+// results live in volatile registers, so it is redone every power-up.
+bool calibrateLRA() {
+  drv.writeRegister8(DRV2605_REG_MODE, DRV2605_MODE_AUTOCAL);
+  drv.useLRA();                                        // FEEDBACK_CTRL: N_ERM_LRA = 1
+  drv.writeRegister8(DRV2605_REG_RATEDV, LRA_RATED_VOLTAGE);
+  drv.writeRegister8(DRV2605_REG_CLAMPV, LRA_OD_CLAMP);
+  drv.writeRegister8(DRV2605_REG_CONTROL1, LRA_DRIVE_TIME);
+  drv.writeRegister8(DRV2605_REG_CONTROL2, 0xB5);      // bidirectional, sane brake factor
+  drv.writeRegister8(DRV2605_REG_CONTROL4, 0x30);      // AUTO_CAL_TIME = longest, most reliable
+
+  drv.writeRegister8(DRV2605_REG_GO, 1);               // start calibrating
+  uint32_t deadline = millis() + 2000;                 // datasheet worst case is ~1.2 s
+  while (drv.readRegister8(DRV2605_REG_GO) & 0x01) {
+    if (millis() > deadline) {
+      Serial.println("[HAPTIC] LRA auto-calibration TIMED OUT — is the motor connected?");
+      return false;
+    }
+    delay(10);
+  }
+  // STATUS bit3 DIAG_RESULT: 0 = pass, 1 = fail (open motor, or parameters out of range)
+  bool pass = (drv.readRegister8(DRV2605_REG_STATUS) & 0x08) == 0;
+  Serial.printf("[HAPTIC] LRA auto-calibration %s
+",
+                pass ? "PASSED" : "FAILED (check the LRA wiring and the datasheet values)");
+  return pass;
+}
+
 void hapticClick(uint8_t effect = 1) {   // 1 = strong click 100%
   if (!hapticsOK) return;
   drv.setWaveform(0, effect);
@@ -688,7 +732,8 @@ static void ui_tick(lv_timer_t *t) {
       snprintf(buf, sizeof(buf), "Batt: not detected");
     lv_label_set_text(lblBatt, buf);
 
-    snprintf(buf, sizeof(buf), "I2C: %s%s", i2cSummary, hapticsOK ? "(LRA ok)" : "(no LRA)");
+    snprintf(buf, sizeof(buf), "I2C: %s%s", i2cSummary,
+             !hapticsOK ? "(no LRA)" : lraCalibrated ? "(LRA cal)" : "(LRA uncal!)");
     lv_label_set_text(lblI2C, buf);
 
     if (pkt.touchCurrent > 0)
@@ -774,10 +819,13 @@ void setup() {
   // Haptics. Optional at runtime: a missing DRV2605L must not stop the panel working.
   hapticsOK = drv.begin(&Wire);
   if (hapticsOK) {
-    drv.selectLibrary(6);                 // 6 = LRA library
+    lraCalibrated = calibrateLRA();       // must happen BEFORE normal playback mode
+    drv.selectLibrary(6);                 // 6 = LRA effect library
     drv.useLRA();
-    drv.setMode(DRV2605_MODE_INTTRIG);
-    Serial.println("[HAPTIC] DRV2605L ready (LRA mode)");
+    drv.setMode(DRV2605_MODE_INTTRIG);    // back to internal trigger for setWaveform/go
+    Serial.printf("[HAPTIC] DRV2605L ready (LRA%s)
+",
+                  lraCalibrated ? ", calibrated" : ", UNCALIBRATED — expect weak clicks");
   } else {
     Serial.println("[HAPTIC] DRV2605L NOT found at 0x5A — running without haptics");
   }
