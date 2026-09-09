@@ -1,0 +1,26 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../dino-game"
+		},
+		{
+			"path": "../dino-game-5btn"
+		},
+		{
+			"path": "../dual-screen"
+		},
+		{
+			"path": "../LodeRunner"
+		},
+		{
+			"path": "../s3-console"
+		},
+		{
+			"path": "../upload_dicom"
+		}
+	],
+	"settings": {}
+}

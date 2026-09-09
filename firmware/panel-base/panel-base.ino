@@ -850,27 +850,7 @@ void setup() {
   power.enableBattVoltageMeasure();
   power.enableSystemVoltageMeasure();
 
-  // Long-press the side button (~6 s) to power the board down. The button is wired to the
-  // AXP2101's PWRON pin, not to the ESP32, so shutdown is the PMU's decision and it ignores
-  // a long press until armed. Order matters: hold time, then OFF-not-restart, then arm.
-  //
-  // NOTE: these three writes live in the PMU and SURVIVE a reset and a reflash. If the board
-  // ever seems dead on battery, try a SHORT press first — it may simply be powered off.
-  // Delete these three lines to disarm it again.
-  power.setPowerKeyPressOffTime(XPOWERS_POWEROFF_6S);   // 4S / 6S / 8S / 10S
-  power.setLongPressPowerOFF();                         // long press = OFF, not restart
-  power.enableLongPressShutdown();
-  Serial.printf("[PMU] long-press power-off armed: hold %d s\n",
-                4 + power.getPowerKeyPressOffTime() * 2);
-
   // SoftPot on IO19 (ADC2). Internal pulldown so an untouched, floating wiper reads ~0.
-  //
-  // FIRST take the pad back from the USB PHY. IO19/IO20 are the native USB D-/D+ pair and on
-  // the ESP32-S3 the USB-Serial-JTAG PHY drives them out of reset; "USB CDC On Boot:
-  // Disabled" only moves Serial, it does NOT release the pads. Left attached, the ADC
-  // measures the PHY and reads a constant 0.
-  gpio_reset_pin((gpio_num_t)PIN_SOFTPOT);
-
   analogReadResolution(12);
   analogSetPinAttenuation(PIN_SOFTPOT, ADC_11db);
   analogRead(PIN_SOFTPOT);                        // let the core configure the pin first
@@ -967,10 +947,7 @@ void loop() {
   static uint32_t lastNotifyMs = 0;
   if (now - lastNotifyMs >= 20) {                 // 50 Hz, same cadence as the trackers
     lastNotifyMs = now;
-    // Read in BOTH modes. Gating this to TRACKER mode made the status screen's raw readout
-    // permanently 0 — that screen only runs in PEDAL mode, so the gate hid the very number
-    // it exists to show. One analogRead costs microseconds.
-    readSoftPot();
+    if (panelMode == MODE_TRACKER) readSoftPot();  // paired with the IMU; skipped on pedals
     if (deviceConnected && orientationChar) {
       orientationChar->setValue(reinterpret_cast<uint8_t *>(&pkt), sizeof(pkt));
       orientationChar->notify();
