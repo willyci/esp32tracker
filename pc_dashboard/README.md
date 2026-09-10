@@ -14,8 +14,81 @@ pip install bleak aiohttp        # once
 python tracker_dashboard.py
 ```
 
-The browser opens `http://localhost:8765` automatically. Power on one or both trackers —
-each card flips from *Scanning…* to *Connected* as its board is found.
+Power on one or both trackers — each card flips from *Scanning…* to *Connected* as its board
+is found. One server, two pages:
+
+| URL | What it's for |
+|---|---|
+| `http://localhost:8765/` | **Engineering view** — 3D cubes, quaternions, calibration, SoftPot, schematic rods. Use this to verify the pipeline. |
+| `http://localhost:8765/pc_connection` | **Demo view** — the real VascCath X-ray screen and catheter-tip rotation dial: what the Vision Pro would be showing. Opens automatically. |
+
+Set `PORT=…` to run a second instance alongside the first.
+
+## The demo page (`/pc_connection`)
+
+Built for demos where visitors will happily hold a **tracker** but won't put on the **headset**.
+It renders the actual VascCath X-ray — the same `CatheterPath_*` / `guideWirePath_*` frame
+sequences over `boneBG.png`, picked by the same rotation→branch quadrant rule the app uses —
+so a visitor rolls the tracker and watches the catheter tip turn and the vessel branch change
+on a big screen, with no Vision Pro in the loop.
+
+The frame math is a 1:1 port in [`vasccath.js`](vasccath.js) of
+`VideoControllerClass.getCatheterFrameByDistance`, `AppModel.branch(forUnitRotation:)` and
+`CatheterTipDial`; the tracker math is shared with the engineering page in
+[`sim.js`](sim.js). **Change one, change the other** — the same rule as the Swift/Python
+duplicates elsewhere in this repo.
+
+### Where the X-ray frames come from
+
+The PNG sequences live in the `Mar2025VasCath_Image` SwiftPM package (609 MB), *not* in this
+repo. The server finds them at startup — first hit wins:
+
+1. `$VASCCATH_IMAGES`
+2. Xcode's checkout: `~/Library/Developer/Xcode/DerivedData/Mar2025VascCath-*/SourcePackages/checkouts/Mar2025VasCath_Image/Sources/VascCathImagePackage`
+3. `pc_dashboard/frames/` — copy the sequence folders here for a machine without Xcode
+
+`boneBG.png` comes from the VascCath app repo next door, or `$VASCCATH_BONEBG`. The startup
+banner prints exactly what it found. If nothing is found the page still runs, with a banner
+and a schematic stand-in instead of the real image.
+
+### Keyboard — the whole procedure, no hardware needed
+
+Two hands drive it, so the demo runs whether or not the trackers and pedals are on the table.
+The three pedal keys are sent to the server and folded in beside the real pedals, so the
+console log and `/` agree with what's on screen.
+
+| Keys | Action |
+|---|---|
+| `A` `D` | catheter advance / retract |
+| `W` `S` | catheter rotate — anticlockwise / clockwise (5° per press) |
+| `J` `L` | guidewire advance / retract |
+| `I` `K` | guidewire rotate — anticlockwise / clockwise |
+| `space` | **hold** for X-ray — a dead-man switch, like the left foot pedal |
+| `Z` `X` `C` `V` | **hold** for a DSA contrast run, like the DSA pedal |
+| `B` `N` `M` `,` `.` `/` | one X-ray capture, like the right foot pedal |
+| `R` `E` `F` `H` | reset tools · re-center trackers · fullscreen · hide the operator panel |
+
+Mouse wheel over the X-ray also advances the catheter (`shift`+wheel = guidewire), and the
+arrow keys still work as catheter aliases.
+
+Two checkboxes in the operator panel:
+
+- **keep X-ray on** — latches fluoro so nobody has to hold `space` through a whole demo. It's
+  the same virtual pedal the space key uses, so closing the tab still releases it, and it
+  re-asserts itself if the server restarts.
+- **insert without grabbing** — insertion normally requires the tool to be *grabbed* (a finger
+  on the SoftPot), exactly as in the app. Tick this to rehearse with no tracker attached.
+
+### Demo-day checklist
+
+1. Trackers powered and showing *Connected* in the header.
+2. Open `/pc_connection`, tick **keep X-ray on**, then press `F` for fullscreen and `H` to
+   hide the operator panel.
+3. The border goes crimson and the anatomy appears. (Or leave the box unticked and hold
+   `space` / the left pedal, if you want the dead-man switch on show.)
+4. Hand over the tracker. Rolling it turns the catheter tip and moves the branch needle;
+   you drive depth from the keyboard.
+5. Past 50 cm the branch **locks** — that's the app's real behaviour, not a bug.
 
 ### macOS notes
 

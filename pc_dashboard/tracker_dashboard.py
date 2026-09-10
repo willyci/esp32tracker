@@ -5,7 +5,12 @@
 # pedals are NOT connected — they are CONNECTIONLESS BROADCASTERS (Vision Pro runs out of
 # BLE connection slots, see firmware/left-foot), so their state is read straight out of
 # advertising manufacturer data during a continuous scan. Everything is pushed over a
-# WebSocket to index.html (two live 3D cubes, simulation panel, pedal status).
+# WebSocket to two pages:
+#
+#   /                → index.html, the engineering view (3D cubes, quaternions, schematic rods)
+#   /pc_connection   → pc_connection.html, the DEMO view: the real VascCath X-ray screen and
+#                      catheter-tip rotation dial, i.e. what the Vision Pro would be showing.
+#                      Built for demos where visitors hold a tracker but nobody wears the AVP.
 #
 #   LEFT pedal  = hold-to-activate X-ray (dead-man switch: on only while held)
 #   RIGHT pedal = one X-ray screen capture per press
@@ -19,6 +24,8 @@
 
 import asyncio
 import json
+import os
+import re
 import socket
 import struct
 import time
@@ -74,7 +81,7 @@ PEDAL_OFFLINE_AFTER = 5.0   # mark the pedal offline in the UI (cosmetic — be 
 # than a dead pedal taking a few seconds to clear. This is a training sim, not a live tube.
 LEVEL_RELEASE_AFTER = 4.0
 
-PORT = 8765
+PORT = int(os.environ.get("PORT", 8765))   # override to run a second instance side by side
 PACKET = struct.Struct("<7f4B")           # w x y z ax ay az, calib, touchStart, touchCurrent, xrayOn = 32 bytes
 BROADCAST_INTERVAL = 1 / 30               # UI doesn't need the firmware's full 50 Hz
 
@@ -110,23 +117,33 @@ last_pedal_count: dict[str, int] = {}     # pedal → last broadcast pressCount 
 last_pedal_seen: dict[str, float] = {}    # pedal → loop time of its last advertisement
 
 
+busy: set[str] = set()                    # devices currently connecting/connected
+websockets: set[web.WebSocketResponse] = set()
+
+# VIRTUAL PEDALS. /pc_connection lets the operator hold keys in place of the foot pedals, so
+# the demo runs when the pedals aren't on the table (or aren't built yet). They are folded in
+# here, next to the real pedals, rather than faked in the browser — that way the console log,
+# index.html and the demo page all agree on one X-ray state.
+#
+# Held state is tracked PER SOCKET so closing the tab releases it, the same fail-safe the real
+# pedals get from their silence timeout: a key must never leave X-ray latched on forever.
+kbd_xray_holders: set[web.WebSocketResponse] = set()
+kbd_dsa_holders: set[web.WebSocketResponse] = set()
+
+
 def xray_on() -> bool:
     """The single shared X-ray state the UI and simulation consume."""
     return latched_xray or xray_held() or dsa_running()
 
 
 def xray_held() -> bool:
-    """X-ray held down on ANY source (foot pedal or touch panel)."""
-    return foot_xray or panel_xray
+    """X-ray held down on ANY source (foot pedal, touch panel, or keyboard)."""
+    return foot_xray or panel_xray or bool(kbd_xray_holders)
 
 
 def dsa_running() -> bool:
     """A contrast run in progress on ANY source."""
-    return foot_dsa or panel_dsa
-
-
-busy: set[str] = set()                    # devices currently connecting/connected
-websockets: set[web.WebSocketResponse] = set()
+    return foot_dsa or panel_dsa or bool(kbd_dsa_holders)
 
 
 def on_packet(dev: str, data: bytearray, mini: bool = False, panel: bool = False) -> None:
@@ -378,8 +395,195 @@ async def broadcast_loop() -> None:
         await asyncio.sleep(BROADCAST_INTERVAL)
 
 
+# ---------------------------------------------------------------------------
+# VascCath X-ray frame sequences (for /pc_connection)
+#
+# The demo page renders the REAL X-ray the Vision Pro renders, which means serving the real
+# PNG sequences. They live in the Mar2025VasCath_Image SwiftPM package — loose .png files in
+# ordinary directories, so they can be served straight off disk with no conversion. They are
+# NOT copied into this repo (609 MB); we point at wherever Xcode already checked them out.
+# ---------------------------------------------------------------------------
+
+HERE = Path(__file__).parent
+
+# sequence key → (directory name, filename pattern). The lowercase "g" in guideWirePath_ is
+# not a typo — that's how the package names them.
+FRAME_SEQUENCES = {
+    "catheter": ("CatheterPath_ver003",  "CatheterPath_{:05d}.png"),
+    "wire":     ("guideWirePath_ver002", "guideWirePath_{:05d}.png"),
+    "coil":     ("CoilPath_ver003",      "CoilPath_{:05d}.png"),
+    "tip":      ("CatheterTipRotation",  "CatheterTipRotation_{:05d}.png"),
+    "dye":      ("DyeAnimation",         "DyeAnim_{:05d}.png"),
+}
+
+_searched_paths: list[str] = []     # for the "not found" message on the page
+
+
+def find_image_package() -> Path | None:
+    """Locate the VascCath image package. First hit wins."""
+    candidates: list[Path] = []
+    if os.environ.get("VASCCATH_IMAGES"):
+        candidates.append(Path(os.environ["VASCCATH_IMAGES"]).expanduser())
+    # Xcode's checkout of the remote package — the normal case on a dev Mac. The DerivedData
+    # folder carries a build-specific hash suffix, hence the glob.
+    candidates += sorted(Path.home().glob(
+        "Library/Developer/Xcode/DerivedData/Mar2025VascCath-*/SourcePackages/checkouts/"
+        "Mar2025VasCath_Image/Sources/VascCathImagePackage"))
+    # A machine without Xcode: copy the sequence folders into pc_dashboard/frames/.
+    candidates.append(HERE / "frames")
+
+    for path in candidates:
+        _searched_paths.append(str(path))
+        if (path / FRAME_SEQUENCES["catheter"][0]).is_dir():
+            return path
+    return None
+
+
+def find_bone_backdrop() -> Path | None:
+    """boneBG.png lives in the VascCath app repo, not the image package."""
+    candidates = []
+    if os.environ.get("VASCCATH_BONEBG"):
+        candidates.append(Path(os.environ["VASCCATH_BONEBG"]).expanduser())
+    candidates += [
+        # this repo sitting next to the VascCath checkout
+        HERE.parent.parent / "Mar2025VascCath_main/Mar2025VascCath/Mar2025VascCath/Resources/boneBG.png",
+        # ...or pc_dashboard/ living inside the VascCath repo itself
+        HERE.parent / "Mar2025VascCath/Resources/boneBG.png",
+        HERE / "frames/boneBG.png",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def scan_sequence(directory: Path, pattern: str) -> dict | None:
+    """Index one frame directory.
+
+    DyeAnimation is SPARSE — ~300 of its indices simply have no file. The page must never
+    request one (a 404 per frame at 30 Hz is both noisy and slow), so a sparse sequence
+    reports its full index list and the page snaps to the nearest one that exists.
+    """
+    if not directory.is_dir():
+        return None
+    # Turn "DyeAnim_{:05d}.png" into a matcher for its numeric field.
+    prefix, suffix = pattern.split("{:05d}")
+    matcher = re.compile(re.escape(prefix) + r"(\d{5})" + re.escape(suffix) + r"$")
+    indices = sorted(int(m.group(1)) for m in
+                     (matcher.match(p.name) for p in directory.iterdir()) if m)
+    if not indices:
+        return None
+
+    info = {"dir": directory.name, "pattern": pattern, "count": len(indices),
+            "first": indices[0], "last": indices[-1]}
+    if len(indices) != indices[-1] - indices[0] + 1:
+        info["sparse"] = True
+        info["indices"] = indices          # only paid for when there really are gaps
+    return info
+
+
+IMAGE_PACKAGE = find_image_package()
+BONE_BACKDROP = find_bone_backdrop()
+ASSET_MANIFEST: dict = {}
+
+
+def build_asset_manifest() -> None:
+    """Index every sequence once at startup — the page asks for this via /api/assets."""
+    global ASSET_MANIFEST
+    sequences = {}
+    if IMAGE_PACKAGE:
+        for key, (dirname, pattern) in FRAME_SEQUENCES.items():
+            found = scan_sequence(IMAGE_PACKAGE / dirname, pattern)
+            if found:
+                sequences[key] = found
+    ASSET_MANIFEST = {
+        "ok": bool(sequences) and BONE_BACKDROP is not None,
+        "base": "/frames",
+        "boneBG": "/assets/boneBG.png" if BONE_BACKDROP else None,
+        "sequences": sequences,
+        "searched": _searched_paths,
+    }
+
+
+def print_asset_banner() -> None:
+    if IMAGE_PACKAGE:
+        print(f"X-ray frames  : {IMAGE_PACKAGE}")
+        for key, info in ASSET_MANIFEST["sequences"].items():
+            gaps = " (sparse)" if info.get("sparse") else ""
+            print(f"    {key:<9} {info['count']:>5} frames  {info['dir']}{gaps}")
+    else:
+        print("X-ray frames  : NOT FOUND — /pc_connection will show the schematic view only.")
+        print("    searched:")
+        for path in _searched_paths:
+            print(f"      {path}")
+        print("    fix: set VASCCATH_IMAGES=/path/to/Sources/VascCathImagePackage")
+    print(f"Bone backdrop : {BONE_BACKDROP or 'NOT FOUND (set VASCCATH_BONEBG)'}")
+
+
+@web.middleware
+async def cache_static(request: web.Request, handler):
+    """Frame PNGs are immutable — let the browser keep them.
+
+    This is what makes scrubbing back and forth smooth: without it every re-visited frame is
+    a fresh request, and the X-ray stutters as the operator retracts.
+    """
+    response = await handler(request)
+    if request.path.startswith(("/frames/", "/assets/")):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
+
+
+async def handle_assets_api(request: web.Request) -> web.Response:
+    return web.json_response(ASSET_MANIFEST)
+
+
+async def handle_bone_backdrop(request: web.Request) -> web.StreamResponse:
+    if not BONE_BACKDROP:
+        raise web.HTTPNotFound(text="boneBG.png not found — set VASCCATH_BONEBG")
+    return web.FileResponse(BONE_BACKDROP)
+
+
+def serve_file(name: str):
+    async def handler(request: web.Request) -> web.FileResponse:
+        return web.FileResponse(HERE / name)
+    return handler
+
+
 async def handle_index(request: web.Request) -> web.FileResponse:
     return web.FileResponse(Path(__file__).parent / "index.html")
+
+
+def on_command(ws: web.WebSocketResponse, raw: str) -> None:
+    """One virtual-pedal command from /pc_connection's keyboard.
+
+      {"cmd":"xray","held":bool}  — hold-to-activate, like the LEFT pedal
+      {"cmd":"dsa","held":bool}   — hold-to-run contrast, like the DSA pedal
+      {"cmd":"capture"}           — one screen capture, like the RIGHT pedal
+    """
+    global capture_count, dsa_runs
+    try:
+        msg = json.loads(raw)
+    except (ValueError, TypeError):
+        return
+    cmd, held = msg.get("cmd"), bool(msg.get("held"))
+
+    if cmd == "xray":
+        was = xray_on()
+        kbd_xray_holders.add(ws) if held else kbd_xray_holders.discard(ws)
+        if xray_on() != was:
+            print(f"[xray] keyboard {'DOWN' if held else 'UP'} -> X-RAY "
+                  f"{'ON' if xray_on() else 'OFF'}")
+    elif cmd == "dsa":
+        was = dsa_running()
+        kbd_dsa_holders.add(ws) if held else kbd_dsa_holders.discard(ws)
+        if dsa_running() != was:
+            if held:
+                dsa_runs += 1
+            print(f"[dsa] keyboard contrast run {'START' if held else 'END'} "
+                  f"-> X-RAY {'ON' if xray_on() else 'OFF'}")
+    elif cmd == "capture":
+        capture_count += 1
+        print(f"[capture] keyboard -> X-RAY CAPTURE #{capture_count}")
 
 
 async def handle_ws(request: web.Request) -> web.WebSocketResponse:
@@ -387,11 +591,17 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
     websockets.add(ws)
     try:
-        async for msg in ws:               # drain (client never sends; detect close)
-            if msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
+        async for msg in ws:
+            if msg.type is WSMsgType.TEXT:
+                on_command(ws, msg.data)   # virtual pedals from the demo page's keyboard
+            elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                 break
     finally:
+        # Releasing on disconnect is the fail-safe: a closed tab must not leave X-ray or a
+        # contrast run latched on, exactly as a silent pedal must not.
         websockets.discard(ws)
+        kbd_xray_holders.discard(ws)
+        kbd_dsa_holders.discard(ws)
     return ws
 
 
@@ -408,9 +618,19 @@ def lan_ip() -> str:
 
 
 async def main() -> None:
-    app = web.Application()
+    build_asset_manifest()
+
+    app = web.Application(middlewares=[cache_static])
     app.router.add_get("/", handle_index)
     app.router.add_get("/ws", handle_ws)
+    # The demo page — the AVP's X-ray and rotation view, for people who aren't wearing one.
+    app.router.add_get("/pc_connection", serve_file("pc_connection.html"))
+    app.router.add_get("/api/assets", handle_assets_api)
+    app.router.add_get("/assets/boneBG.png", handle_bone_backdrop)
+    for module in ("sim.js", "vasccath.js"):
+        app.router.add_get(f"/{module}", serve_file(module))
+    if IMAGE_PACKAGE:
+        app.router.add_static("/frames", IMAGE_PACKAGE)
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -423,8 +643,10 @@ async def main() -> None:
     print("Dashboard running:")
     print(f"  this PC : {local_url}")
     print(f"  phone   : {phone_url}   (same Wi-Fi)")
+    print(f"  DEMO    : {local_url}/pc_connection   (X-ray + rotation, no headset needed)")
     print("  (Ctrl+C to stop)")
-    webbrowser.open(local_url)
+    print_asset_banner()
+    webbrowser.open(f"{local_url}/pc_connection")
 
     await asyncio.gather(scan_loop(), broadcast_loop())
 

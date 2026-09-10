@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<!-- The DEMO page: what the Vision Pro would be showing, on a PC screen.
+
+     At demos people will hold a tracker but won't put on the headset, so the interesting
+     half of the system is invisible. This page renders the REAL VascCath X-ray — the same
+     CatheterPath_*/guideWirePath_* frame sequences composited over boneBG.png, chosen by the
+     same rotation→branch quadrant rule — driven live by the tracker over BLE.
+
+     Served by tracker_dashboard.py. Frame math lives in vasccath.js, tracker math in sim.js;
+     both are 1:1 ports of the Swift app, so this page and the headset agree by construction. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VascCath — PC connection</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0d10;  --panel: #14171c;  --line: #262b33;
+    --ink: #e8e8ea; --dim: #9aa0a8;    --faint: #6b7280;
+    --teal: #0d9488; --purple: #9333ea; --green: #4ade80;
+    --amber: #f97316; --crimson: #c8102e;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .mono { font-family: Consolas, "SF Mono", monospace; }
+
+  /* ---------- top strip: connection + imaging state ---------- */
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 10px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .brand { font-size: 15px; font-weight: 700; letter-spacing: .06em; margin-right: 4px; }
+  .brand small { display: block; font-size: 10.5px; font-weight: 400;
+                 letter-spacing: .04em; color: var(--faint); }
+  .badge { font-size: 12px; padding: 4px 11px; border-radius: 10px;
+           background: #232830; color: var(--dim); white-space: nowrap; }
+  .badge.on    { background: #163a26; color: var(--green); }
+  .badge.live  { background: #7c2d12; color: #fdba74; }
+  .badge.fault { background: #7f1d1d; color: #fca5a5; }
+  .spacer { flex: 1; }
+
+  #status-lamp {
+    font-size: 17px; font-weight: 800; letter-spacing: .10em;
+    padding: 7px 20px; border-radius: 8px; background: #232830; color: var(--dim);
+  }
+  #status-lamp.fluoro { background: #14532d; color: var(--green); }
+  #status-lamp.dsa    { background: #7c2d12; color: #fdba74; }
+  #dose { font-size: 12.5px; color: var(--dim); }
+  #dose b { color: var(--ink); }
+
+  /* ---------- layout ---------- */
+  main { flex: 1; display: flex; gap: 20px; padding: 18px; min-height: 0; }
+  .stage { flex: 1; display: flex; align-items: center; justify-content: center; min-width: 0; }
+  aside { width: 330px; flex-shrink: 0; display: flex; flex-direction: column;
+          gap: 14px; overflow-y: auto; }
+
+  /* ---------- the X-ray screen (mirrors XRayScreenView) ---------- */
+  /* Square stack, back-to-front bone → dye → catheter → wire, pure alpha-over compositing
+     (the SwiftUI version uses no blend modes). The border goes crimson while fluoro is on. */
+  #xray {
+    position: relative; aspect-ratio: 1; height: 100%; max-height: 100%;
+    background: #000; border: 12px solid #000; border-radius: 4px;
+    overflow: hidden; transition: border-color .12s;
+  }
+  #xray.live { border-color: var(--crimson); }
+  #xray canvas { position: absolute; inset: 0; width: 100%; height: 100%;
+                 display: block; object-fit: cover; }
+  #standby {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 10px;
+    background: rgba(0,0,0,.72); text-align: center; padding: 24px;
+  }
+  #standby .big { font-size: 21px; font-weight: 700; letter-spacing: .05em; color: var(--dim); }
+  #standby .sub { font-size: 13px; color: var(--faint); max-width: 34ch; line-height: 1.7; }
+  #standby kbd, #standby b { color: var(--dim); font-weight: 600; }
+  #standby kbd { font-family: Consolas, monospace; font-size: 12px; }
+  #standby.hide { display: none; }
+
+  /* Burned-in corner annotations, like a real fluoro monitor. */
+  .anno { position: absolute; font-size: 13px; letter-spacing: .03em;
+          color: rgba(255,255,255,.82); pointer-events: none; text-shadow: 0 1px 3px #000; }
+  .anno.tl { top: 12px; left: 14px; }
+  .anno.tr { top: 12px; right: 14px; text-align: right; }
+  .anno.bl { bottom: 12px; left: 14px; }
+  .anno.br { bottom: 12px; right: 14px; text-align: right; }
+
+  #capture-flash { position: absolute; inset: 0; background: #fff; opacity: 0;
+                   pointer-events: none; }
+  #capture-flash.fire { animation: capflash .35s ease-out; }
+  @keyframes capflash { 0% { opacity: .8; } 100% { opacity: 0; } }
+
+  /* ---------- right rail ---------- */
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: 12px; padding: 14px; }
+  .card h2 { font-size: 11.5px; font-weight: 700; text-transform: uppercase;
+             letter-spacing: .09em; color: var(--faint); margin: 0 0 11px; }
+
+  /* Rotation: the app's own tip dial image + the quadrant that picks the branch. */
+  .rot-row { display: flex; gap: 14px; align-items: center; }
+  #tip-dial { width: 104px; height: 104px; flex-shrink: 0; border-radius: 8px;
+              background: #1b1f26; display: block; }
+  .rot-nums { flex: 1; min-width: 0; }
+  .rot-deg { font-size: 30px; font-weight: 700; line-height: 1; }
+  .rot-sub { font-size: 12px; color: var(--dim); margin-top: 4px; }
+
+  #quadrant { width: 118px; height: 118px; flex-shrink: 0; }
+  .rot-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em;
+               color: var(--faint); line-height: 1.45; }
+  .branch-line { display: flex; align-items: center; gap: 9px; margin-top: 5px; }
+  .branch-name { font-size: 16px; font-weight: 700; line-height: 1.2; }
+  .branch-name.celiac  { color: #60a5fa; }
+  .branch-name.splenic { color: var(--green); }
+  .branch-name.hepatic { color: #fbbf24; }
+  .branch-name.gastric { color: #f472b6; }
+
+  /* Depth bars, with the celiac branching point marked. */
+  .tool { margin-bottom: 13px; }
+  .tool:last-child { margin-bottom: 0; }
+  .tool-head { display: flex; align-items: baseline; gap: 8px; font-size: 13px;
+               margin-bottom: 6px; }
+  .tool-name { font-weight: 600; flex: 1; }
+  .tool-cm { font-size: 15px; font-weight: 700; }
+  .tool-cm small { font-size: 10.5px; font-weight: 400; color: var(--faint); }
+  .bar { position: relative; height: 13px; background: #21262e;
+         border-radius: 7px; overflow: hidden; }
+  .bar-fill { position: absolute; inset: 0 auto 0 0; border-radius: 7px;
+              transition: width .05s linear; }
+  .bar-mark { position: absolute; top: -2px; bottom: -2px; width: 2px;
+              background: rgba(255,255,255,.45); }
+  .bar-mark::after { content: "celiac"; position: absolute; top: 15px; left: -15px;
+                     font-size: 9px; color: var(--faint); letter-spacing: .04em; }
+  .grab { font-size: 10.5px; padding: 2px 8px; border-radius: 8px;
+          background: #232830; color: var(--faint); }
+  .grab.on { background: #163a26; color: var(--green); }
+
+  table.raw { width: 100%; border-collapse: collapse; font-size: 11.5px; color: var(--dim); }
+  table.raw td { padding: 1.5px 0; }
+  table.raw td.v { text-align: right; color: var(--ink); }
+
+  /* ---------- operator controls ---------- */
+  .keys { font-size: 11.5px; color: var(--dim); line-height: 1.85; }
+  .keys kbd { background: #232830; border: 1px solid #333a45; border-bottom-width: 2px;
+              border-radius: 4px; padding: 1px 6px; font-size: 10.5px;
+              font-family: Consolas, monospace; color: var(--ink); margin-right: 1px; }
+  .keys small { color: var(--faint); font-size: 10px; }
+  .toggle { display: flex; align-items: center; gap: 8px; font-size: 12px;
+            color: var(--dim); margin-top: 9px; cursor: pointer; }
+  .toggle small { color: var(--faint); font-size: 11px; }
+  button { background: #232830; color: var(--ink); border: 1px solid #333a45;
+           border-radius: 7px; padding: 6px 13px; font-size: 12.5px; cursor: pointer; }
+  button:hover { background: #2d333d; }
+  .btn-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+  /* ---------- fallback banner when the frame package isn't on this machine ---------- */
+  #asset-warn { display: none; padding: 11px 18px; background: #422006;
+                border-bottom: 1px solid #7c2d12; font-size: 12.5px; color: #fdba74; }
+  #asset-warn.show { display: block; }
+  #asset-warn code { color: #fed7aa; }
+  #asset-warn details { margin-top: 6px; }
+  #asset-warn li { font-size: 11px; color: #d6a97a; }
+
+  /* Schematic stand-in, used only when the real frames aren't available. */
+  #schematic { position: absolute; inset: 0; display: none; }
+  #schematic.show { display: block; }
+
+  body.presenting header, body.presenting #keys-card { display: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="brand">VascCath<small>PC connection · tracker demo</small></span>
+  <span class="badge" id="b-left">Left tracker</span>
+  <span class="badge" id="b-right">Right tracker</span>
+  <span class="badge" id="b-lfoot">L pedal</span>
+  <span class="badge" id="b-dsa">DSA pedal</span>
+  <span class="badge" id="b-cap">captures 0</span>
+  <span class="spacer"></span>
+  <span id="dose">fluoro <b id="dose-s">0.0</b> s</span>
+  <span id="status-lamp">STANDBY</span>
+</header>
+
+<div id="asset-warn">
+  <b>X-ray frame sequences not found</b> — showing the schematic view instead.
+  Point the server at them with <code>VASCCATH_IMAGES=/path/to/Sources/VascCathImagePackage</code>,
+  or copy the sequence folders into <code>pc_dashboard/frames/</code>.
+  <details><summary>paths searched</summary><ul id="asset-paths"></ul></details>
+</div>
+
+<main>
+  <div class="stage">
+    <div id="xray">
+      <canvas id="c-bone"></canvas>
+      <canvas id="c-dye"></canvas>
+      <canvas id="c-catheter"></canvas>
+      <canvas id="c-wire"></canvas>
+      <svg id="schematic" viewBox="0 0 400 400" preserveAspectRatio="none"></svg>
+
+      <div class="anno tl mono" id="a-tl">STANDBY</div>
+      <div class="anno tr mono" id="a-tr">RUN 0</div>
+      <div class="anno bl mono" id="a-bl">CATH 0.0 cm</div>
+      <div class="anno br mono" id="a-br">WIRE 0.0 cm</div>
+
+      <div id="standby">
+        <div class="big">X-RAY OFF</div>
+        <div class="sub">Press the tracker's X-ray button, hold the left foot pedal or
+                         <kbd>space</kbd>, or tick <b>keep X-ray on</b>.</div>
+      </div>
+      <div id="capture-flash"></div>
+    </div>
+  </div>
+
+  <aside>
+    <div class="card">
+      <h2>Catheter tip rotation</h2>
+      <div class="rot-row">
+        <canvas id="tip-dial" width="208" height="208"></canvas>
+        <div class="rot-nums">
+          <div class="rot-deg mono"><span id="rot-deg">0</span>°</div>
+          <div class="rot-sub mono">
+            <span id="rot-turns">+0.00</span> turns<br>
+            roll the tracker to steer
+          </div>
+        </div>
+      </div>
+
+      <div class="rot-row" style="margin-top:14px">
+        <svg id="quadrant" viewBox="0 0 150 150"></svg>
+        <div class="rot-nums">
+          <div class="rot-label">rotation selects the branch</div>
+          <div class="branch-line">
+            <span class="branch-name celiac" id="branch-name">Celiac Trunk</span>
+          </div>
+          <div class="branch-line" style="margin-top:7px">
+            <span class="badge" id="branch-lock">selecting</span>
+          </div>
+          <div class="rot-label" id="q-hint" style="margin-top:8px">turn to choose, then advance</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Insertion depth</h2>
+      <div class="tool">
+        <div class="tool-head">
+          <span class="tool-name" style="color:var(--teal)">Catheter · left</span>
+          <span class="grab" id="grab-left">free</span>
+          <span class="tool-cm mono"><span id="cm-left">0.0</span> <small>/ 58 cm</small></span>
+        </div>
+        <div class="bar"><div class="bar-fill" id="bar-left" style="background:var(--teal)"></div>
+          <div class="bar-mark" id="mark-left"></div></div>
+      </div>
+      <div class="tool" style="margin-top:20px">
+        <div class="tool-head">
+          <span class="tool-name" style="color:var(--purple)">Guidewire · right</span>
+          <span class="grab" id="grab-right">free</span>
+          <span class="tool-cm mono"><span id="cm-right">0.0</span> <small>/ 61 cm</small></span>
+        </div>
+        <div class="bar"><div class="bar-fill" id="bar-right" style="background:var(--purple)"></div>
+          <div class="bar-mark" id="mark-right"></div></div>
+      </div>
+    </div>
+
+    <div class="card" id="keys-card">
+      <h2>Operator</h2>
+      <div class="keys">
+        <span style="color:var(--teal)">catheter</span>
+          <kbd>A</kbd><kbd>D</kbd> in / out · <kbd>W</kbd><kbd>S</kbd> rotate<br>
+        <span style="color:var(--purple)">guidewire</span>
+          <kbd>J</kbd><kbd>L</kbd> in / out · <kbd>I</kbd><kbd>K</kbd> rotate<br>
+        <kbd>space</kbd> hold for X-ray <small>(left pedal)</small><br>
+        <kbd>Z</kbd><kbd>X</kbd><kbd>C</kbd><kbd>V</kbd> hold for DSA <small>(DSA pedal)</small><br>
+        <kbd>B</kbd><kbd>N</kbd><kbd>M</kbd><kbd>,</kbd><kbd>.</kbd><kbd>/</kbd> capture
+          <small>(right pedal)</small><br>
+        <kbd>R</kbd> reset · <kbd>E</kbd> re-center · <kbd>F</kbd> fullscreen · <kbd>H</kbd> hide
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="xray-latch">
+        keep X-ray on <small>— no need to hold space</small>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="force-insert">
+        insert without grabbing <small>— rehearsal, no tracker</small>
+      </label>
+      <div class="btn-row">
+        <button id="btn-reset">Reset tools</button>
+        <button id="btn-recenter">Re-center</button>
+      </div>
+      <table class="raw" style="margin-top:12px">
+        <tr><td>left quat w</td><td class="v mono" id="raw-left">—</td></tr>
+        <tr><td>right quat w</td><td class="v mono" id="raw-right">—</td></tr>
+        <tr><td>catheter frame</td><td class="v mono" id="raw-fc">—</td></tr>
+        <tr><td>wire frame</td><td class="v mono" id="raw-fw">—</td></tr>
+      </table>
+    </div>
+  </aside>
+</main>
+
+<script type="module">
+"use strict";
+
+import { qConj, tools, simIngest, simForget, handMoved, twistBy, resetTools, SIM } from "./sim.js";
+import * as V from "./vasccath.js";
+
+const HANDS = ["left", "right"];
+const $ = id => document.getElementById(id);
+
+// ---------------------------------------------------------------------------
+// Frame cache
+//
+// The X-ray is a PNG sequence, and at 30 Hz a plain <img src=…> swap goes blank while the
+// next file decodes — which reads as flicker. So: decode into a cache, draw onto a canvas,
+// and leave the previous frame up until the new one is actually ready. Mirrors the app's
+// ImageCache (NSCache, countLimit 150).
+// ---------------------------------------------------------------------------
+const CACHE_LIMIT = 220;
+const PREFETCH = 12;            // frames either side of the current one
+const cache = new Map();        // url → HTMLImageElement (insertion-ordered = LRU)
+const failed = new Set();       // urls that 404'd, so we ask only once
+
+function frameImage(url) {
+  const hit = cache.get(url);
+  if (hit) {                    // refresh LRU position
+    cache.delete(url); cache.set(url, hit);
+    return hit.complete && hit.naturalWidth ? hit : null;
+  }
+  if (failed.has(url)) return null;
+
+  const img = new Image();
+  img.decoding = "async";
+  img.onerror = () => { failed.add(url); cache.delete(url); };
+  img.src = url;
+  cache.set(url, img);
+  while (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value);
+  return null;
+}
+
+/// Draw a frame, keeping whatever is already there if it isn't decoded yet.
+function drawFrame(canvas, url) {
+  if (canvas._drawn === url) return;
+  const img = url && frameImage(url);
+  if (!img) return;             // not ready — hold the previous frame rather than blanking
+  const ctx = canvas.getContext("2d");
+  if (canvas.width !== img.naturalWidth) {
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+  }
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  canvas._drawn = url;
+}
+
+function clearCanvas(canvas) {
+  if (canvas._drawn === null) return;
+  canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+  canvas._drawn = null;
+}
+
+// ---------------------------------------------------------------------------
+// Asset manifest — which sequences the server actually found
+// ---------------------------------------------------------------------------
+let assets = null;
+
+/// Build a frame URL, snapping to an index that exists. DyeAnimation is sparse (~300 of its
+/// indices have no file), so a naive request would 404 at 30 Hz.
+function frameURL(key, index) {
+  const seq = assets?.sequences?.[key];
+  if (!seq) return null;
+  let i = Math.max(seq.first, Math.min(index, seq.last));
+  if (seq.sparse) i = nearestExisting(seq, i);
+  const name = seq.pattern.replace("{:05d}", String(i).padStart(5, "0"));
+  return `${assets.base}/${seq.dir}/${name}`;
+}
+
+function nearestExisting(seq, target) {
+  const list = seq.indices;
+  let lo = 0, hi = list.length - 1;
+  while (lo < hi) {                       // binary search for the first index >= target
+    const mid = (lo + hi) >> 1;
+    if (list[mid] < target) lo = mid + 1; else hi = mid;
+  }
+  const above = list[lo], below = list[Math.max(0, lo - 1)];
+  return Math.abs(above - target) <= Math.abs(target - below) ? above : below;
+}
+
+/// Warm the frames just ahead of and behind the current position, so ordinary advancing and
+/// retracting never wait on a decode.
+function prefetch(key, index) {
+  for (let d = 1; d <= PREFETCH; d++) {
+    frameImage(frameURL(key, index + d));
+    frameImage(frameURL(key, index - d));
+  }
+}
+
+async function loadAssets() {
+  try {
+    assets = await (await fetch("/api/assets")).json();
+  } catch { assets = { ok: false, sequences: {}, searched: [] }; }
+
+  if (!assets.ok) {
+    $("asset-warn").classList.add("show");
+    $("schematic").classList.add("show");
+    $("asset-paths").innerHTML =
+      (assets.searched || []).map(p => `<li>${p}</li>`).join("");
+    buildSchematic();
+  }
+  if (assets.boneBG) frameImage(assets.boneBG);   // start the backdrop decoding immediately
+}
+
+// ---------------------------------------------------------------------------
+// Live state from the server
+// ---------------------------------------------------------------------------
+const latest = {};                                  // device → last sample (+ xray/pedals)
+const reference = { left: { w: 1, x: 0, y: 0, z: 0 }, right: { w: 1, x: 0, y: 0, z: 0 } };
+let currentPath = "CeliacTrunk";
+let seenCaptures = null;
+let doseSeconds = 0;
+let dsaStartedAt = null;                            // performance.now() when the run began
+
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  socket = ws;                                      // the keyboard's virtual pedals send here
+  // The server tracks held pedals PER SOCKET, so a reconnect starts with everything released.
+  // Re-assert whatever is still down, or a latched X-ray would go dark on a server restart.
+  ws.onopen = () => {
+    for (const cmd of new Set([...heldKeys].map(t => t.split(":")[0])))
+      send({ cmd, held: true });
+  };
+  ws.onmessage = e => {
+    const data = JSON.parse(e.data);
+    Object.assign(latest, data);
+    for (const hand of HANDS) {
+      if (data[hand]?.connected) simIngest(hand, data[hand]);
+      else simForget(hand);
+    }
+  };
+  ws.onclose = () => setTimeout(connect, 1000);
+}
+
+// ---------------------------------------------------------------------------
+// Operator input — the PC stand-in for the headset and the hardware
+//
+// Two hands on the keyboard drive the whole procedure, so the demo runs whether or not the
+// trackers and pedals are on the table:
+//
+//   LEFT HAND   catheter      A advance / D retract · W/S rotate
+//   RIGHT HAND  guidewire     J advance / L retract · I/K rotate
+//   SPACE       X-ray         hold, exactly like the left foot pedal (dead-man switch)
+//   Z X C V     DSA           hold for a contrast run, like the DSA pedal
+//   B N M , . / capture       one X-ray capture, like the right foot pedal
+//
+// The three pedal actions are sent to the server rather than faked here — see on_command()
+// in tracker_dashboard.py — so the console and index.html show the same X-ray state.
+// ---------------------------------------------------------------------------
+const STEP = 0.015;                          // meters of hand travel per key press
+const TWIST_STEP = 5 * Math.PI / 180;        // radians per key press
+
+const forced = () => $("force-insert").checked;
+const insert = (hand, delta) => handMoved(hand, delta, forced());
+
+// key → [hand, insertion delta]. handMoved advances on a NEGATIVE delta (VascCath's mapping),
+// so the first key of each pair pushes the tool in. Arrow keys are aliases for the catheter.
+const MOVE_KEYS = {
+  a: ["left", -STEP],  d: ["left", +STEP],   arrowleft: ["left", -STEP],  arrowright: ["left", +STEP],
+  j: ["right", -STEP], l: ["right", +STEP],  arrowdown: ["right", -STEP], arrowup: ["right", +STEP],
+};
+// key → [hand, twist delta]
+const TWIST_KEYS = {
+  s: ["left", +TWIST_STEP],  w: ["left", -TWIST_STEP],
+  k: ["right", +TWIST_STEP], i: ["right", -TWIST_STEP],
+};
+const DSA_KEYS = new Set(["z", "x", "c", "v"]);
+const CAPTURE_KEYS = new Set(["b", "n", "m", ",", ".", "/"]);
+
+let socket = null;
+const send = payload => socket?.readyState === WebSocket.OPEN &&
+                        socket.send(JSON.stringify(payload));
+
+// Which hold-to-activate keys are physically down. A pedal key auto-repeats while held, so
+// the command is only sent on the first keydown and again on keyup.
+const heldKeys = new Set();
+const LATCH = "latch";     // the X-ray checkbox, held like a key that never auto-releases
+
+window.addEventListener("keydown", e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const key = e.key.toLowerCase();
+
+  if (MOVE_KEYS[key])  { const [h, d] = MOVE_KEYS[key];  insert(h, d); }
+  else if (TWIST_KEYS[key]) { const [h, d] = TWIST_KEYS[key]; twistBy(h, d); }
+  else if (key === " ")      hold("xray", key);
+  else if (DSA_KEYS.has(key)) hold("dsa", key);
+  else if (CAPTURE_KEYS.has(key)) { if (!e.repeat) send({ cmd: "capture" }); }
+  else if (key === "r") resetAll();
+  else if (key === "e") HANDS.forEach(recenter);
+  else if (key === "f") toggleFullscreen();
+  else if (key === "h") document.body.classList.toggle("presenting");
+  else return;
+  e.preventDefault();
+});
+
+window.addEventListener("keyup", e => {
+  const key = e.key.toLowerCase();
+  if (key === " ") release("xray", key);
+  else if (DSA_KEYS.has(key)) release("dsa", key);
+});
+
+// The X-ray latch: a sticky version of holding space, for a long demo where nobody wants a
+// finger pinned to the keyboard. It goes through the same per-socket holder set as the space
+// key, so closing the tab still releases it — the fail-safe survives.
+$("xray-latch").onchange = e =>
+  e.target.checked ? hold("xray", LATCH) : release("xray", LATCH);
+
+// Losing focus mid-hold must release a pedal, or X-ray sticks on with nothing pressed. The
+// latch checkbox is exempt: it's a deliberate setting, not a key someone forgot to let go of.
+window.addEventListener("blur", () => {
+  for (const tag of [...heldKeys]) {
+    if (tag.endsWith(`:${LATCH}`)) continue;
+    heldKeys.delete(tag);
+    const cmd = tag.split(":")[0];
+    if (!anyHeld(cmd)) send({ cmd, held: false });
+  }
+});
+
+/// Press one of a group of interchangeable keys: the pedal goes down on the first, and only
+/// comes up when the last one is released.
+function hold(cmd, key) {
+  const tag = `${cmd}:${key}`;
+  if (heldKeys.has(tag)) return;                 // auto-repeat, not a new press
+  const wasDown = anyHeld(cmd);
+  heldKeys.add(tag);
+  if (!wasDown) send({ cmd, held: true });
+}
+
+function release(cmd, key) {
+  heldKeys.delete(`${cmd}:${key}`);
+  if (!anyHeld(cmd)) send({ cmd, held: false });
+}
+
+const anyHeld = cmd => [...heldKeys].some(t => t.startsWith(`${cmd}:`));
+
+$("xray").addEventListener("wheel", e => {
+  insert(e.shiftKey ? "right" : "left", -e.deltaY * 0.0002);
+  e.preventDefault();
+}, { passive: false });
+
+function recenter(hand) {
+  const s = latest[hand];
+  if (!s) return;
+  // Same as the Swift app: reference = (negated raw quaternion).inverse
+  reference[hand] = qConj({ w: s.w, x: -s.x, y: s.y, z: -s.z });
+}
+
+function resetAll() {
+  resetTools();
+  currentPath = "CeliacTrunk";
+  doseSeconds = 0;
+}
+
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+}
+
+$("btn-reset").onclick = resetAll;
+$("btn-recenter").onclick = () => HANDS.forEach(recenter);
+
+// ---------------------------------------------------------------------------
+// The branch quadrant wheel — the rotation → vessel decision, drawn once and updated live
+// ---------------------------------------------------------------------------
+const QUADRANTS = [
+  { path: "CeliacTrunk",   label: "Celiac",  full: "Celiac Trunk",    cls: "celiac",  from: -45, to:  45, color: "#60a5fa" },
+  { path: "SplenicArtery", label: "Splenic", full: "Splenic Artery",  cls: "splenic", from:  45, to: 135, color: "#4ade80" },
+  { path: "HepaticArtery", label: "Hepatic", full: "Hepatic Artery",  cls: "hepatic", from: 135, to: 225, color: "#fbbf24" },
+  { path: "GastricArtery", label: "Gastric", full: "Gastric Artery",  cls: "gastric", from: 225, to: 315, color: "#f472b6" },
+];
+const QUAD = Object.fromEntries(QUADRANTS.map(q => [q.path, q]));
+const CX = 75, CY = 75, R = 58;
+
+/// Screen position for a branch angle. 0° points right and angle increases clockwise, so the
+/// wheel reads the same way the operator's wrist turns.
+const polar = (deg, r) => [CX + r * Math.cos(deg * Math.PI / 180),
+                           CY + r * Math.sin(deg * Math.PI / 180)];
+
+function buildQuadrant() {
+  const parts = QUADRANTS.map(q => {
+    const [x1, y1] = polar(q.from, R), [x2, y2] = polar(q.to, R);
+    const [lx, ly] = polar((q.from + q.to) / 2, R * 0.62);
+    return `<path id="q-${q.path}" d="M ${CX} ${CY} L ${x1} ${y1} A ${R} ${R} 0 0 1 ${x2} ${y2} Z"
+                  fill="${q.color}" fill-opacity="0.10"
+                  stroke="#262b33" stroke-width="1"/>
+            <text x="${lx}" y="${ly}" fill="${q.color}" font-size="9.5" opacity=".75"
+                  text-anchor="middle" dominant-baseline="middle">${q.label}</text>`;
+  }).join("");
+  $("quadrant").innerHTML = `
+    ${parts}
+    <line id="q-needle" x1="${CX}" y1="${CY}" x2="${CX + R}" y2="${CY}"
+          stroke="#f97316" stroke-width="2.5" stroke-linecap="round"/>
+    <circle cx="${CX}" cy="${CY}" r="3.5" fill="#f97316"/>`;
+}
+buildQuadrant();
+
+// ---------------------------------------------------------------------------
+// Schematic fallback — only drawn when the real frame package isn't on this machine
+// ---------------------------------------------------------------------------
+function buildSchematic() {
+  $("schematic").innerHTML = `
+    <line x1="20" y1="200" x2="380" y2="200" stroke="#2a2e36" stroke-width="26"
+          stroke-linecap="round"/>
+    <line id="s-cath" x1="380" y1="200" x2="380" y2="200" stroke="#e8e8ea"
+          stroke-width="10" stroke-linecap="round"/>
+    <line id="s-wire" x1="380" y1="200" x2="380" y2="200" stroke="#fff"
+          stroke-width="4.5" stroke-linecap="round"/>`;
+}
+
+function renderSchematic() {
+  const cath = $("s-cath"), wire = $("s-wire");
+  if (!cath) return;
+  const span = 360, entry = 380;
+  cath.setAttribute("x2", entry - span * (tools.left.insertion / V.MAX_CATHETER_DISTANCE));
+  wire.setAttribute("x2", entry - span * (tools.right.insertion / V.MAX_WIRE_DISTANCE));
+}
+
+// ---------------------------------------------------------------------------
+// Render loop
+// ---------------------------------------------------------------------------
+let lastTick = performance.now();
+
+function render(now) {
+  const dt = (now - lastTick) / 1000;
+  lastTick = now;
+
+  const cath = tools.left, wire = tools.right;
+  const xrayOn = !!latest.xray;
+  const dsaActive = !!latest.dsaActive;
+
+  // --- branch selection: rotation picks it, crossing the celiac trunk locks it ---
+  currentPath = V.updateCatheterPath(currentPath, cath.twist, cath.insertion, wire.insertion);
+  const locked = V.pathCommitted(cath.insertion, wire.insertion);
+  const aiming = V.branch(cath.twist);
+
+  // --- the X-ray composite ---
+  $("xray").classList.toggle("live", xrayOn);
+  $("standby").classList.toggle("hide", xrayOn);
+
+  const frameC = V.getCatheterFrameByDistance(cath.insertion, currentPath);
+  const frameW = V.getWirePathFrame(wire.insertion, currentPath);
+
+  if (xrayOn && assets?.ok) {
+    drawFrame($("c-bone"), assets.boneBG);
+    drawFrame($("c-catheter"), frameURL("catheter", frameC));
+    drawFrame($("c-wire"), frameURL("wire", frameW));
+    prefetch("catheter", frameC);
+    prefetch("wire", frameW);
+    renderDye(dsaActive, now);
+  } else {
+    [$("c-bone"), $("c-dye"), $("c-catheter"), $("c-wire")].forEach(clearCanvas);
+  }
+  if (assets && !assets.ok) renderSchematic();
+
+  // --- burned-in annotations ---
+  $("a-tl").textContent = dsaActive ? "DSA" : (xrayOn ? "FLUORO" : "STANDBY");
+  $("a-tl").style.color = dsaActive ? "#fdba74" : (xrayOn ? "#4ade80" : "#9aa0a8");
+  $("a-tr").textContent = `${QUAD[currentPath].label.toUpperCase()} · RUN ${latest.dsaRuns ?? 0}`;
+  $("a-bl").textContent = `CATH ${(cath.insertion * 100).toFixed(1)} cm`;
+  $("a-br").textContent = `WIRE ${(wire.insertion * 100).toFixed(1)} cm`;
+
+  // --- rotation panel ---
+  const deg = cath.twist * 180 / Math.PI;
+  $("rot-deg").textContent = Math.round(deg);
+  $("rot-turns").textContent = (deg / 360 >= 0 ? "+" : "") + (deg / 360).toFixed(2);
+  drawFrame($("tip-dial"), frameURL("tip", V.tipRotationFrame(cath.twist)));
+  prefetch("tip", V.tipRotationFrame(cath.twist));
+
+  // The needle follows the live rotation; the highlighted sector is the branch that angle
+  // selects — which stops mattering once the path is committed.
+  const [nx, ny] = polar(deg, R);
+  const needle = $("q-needle");
+  needle.setAttribute("x2", nx);
+  needle.setAttribute("y2", ny);
+  for (const q of QUADRANTS) {
+    const active = locked ? q.path === currentPath : q.path === aiming;
+    document.getElementById(`q-${q.path}`)
+            .setAttribute("fill-opacity", active ? (locked ? "0.42" : "0.30") : "0.10");
+  }
+  $("q-hint").textContent = locked ? "committed past the celiac" : "turn to choose, then advance";
+
+  const nameEl = $("branch-name");
+  nameEl.textContent = QUAD[currentPath].full;
+  nameEl.className = "branch-name " + QUAD[currentPath].cls;
+  const lockEl = $("branch-lock");
+  lockEl.textContent = locked ? "LOCKED" : "selecting";
+  lockEl.className = "badge" + (locked ? " live" : "");
+
+  // --- depth bars ---
+  for (const hand of HANDS) {
+    const t = tools[hand];
+    const max = SIM.maxInsertion[hand];
+    $(`cm-${hand}`).textContent = (t.insertion * 100).toFixed(1);
+    $(`bar-${hand}`).style.width = `${(t.insertion / max) * 100}%`;
+    $(`mark-${hand}`).style.left = `${(V.CELIAC_TRUNK_DISTANCE / max) * 100}%`;
+    const g = $(`grab-${hand}`);
+    g.textContent = t.grabbed ? "GRABBED" : "free";
+    g.className = "grab" + (t.grabbed ? " on" : "");
+  }
+
+  // --- header ---
+  if (xrayOn) doseSeconds += dt;
+  $("dose-s").textContent = doseSeconds.toFixed(1);
+
+  const lamp = $("status-lamp");
+  lamp.textContent = dsaActive ? "DSA — CONTRAST" : (xrayOn ? "FLUORO" : "STANDBY");
+  lamp.className = dsaActive ? "dsa" : (xrayOn ? "fluoro" : "");
+
+  badge("b-left",  "Left tracker",  latest.left?.connected);
+  badge("b-right", "Right tracker", latest.right?.connected);
+  badge("b-lfoot", latest.pedalHeld ? "L pedal HELD" : "L pedal",
+        latest["left-foot"]?.connected, latest.pedalHeld);
+  badge("b-dsa",   latest.dsaFault ? "DSA FAULT" : "DSA pedal",
+        latest["dsa-foot"]?.connected, dsaActive, latest.dsaFault);
+
+  const captures = latest.captureCount ?? 0;
+  $("b-cap").textContent = `captures ${captures}`;
+  if (seenCaptures !== null && captures > seenCaptures) {
+    const flash = $("capture-flash");
+    flash.classList.remove("fire"); void flash.offsetWidth;   // restart the animation
+    flash.classList.add("fire");
+  }
+  if (latest.captureCount !== undefined) seenCaptures = captures;
+
+  $("raw-left").textContent  = latest.left  ? latest.left.w.toFixed(3)  : "—";
+  $("raw-right").textContent = latest.right ? latest.right.w.toFixed(3) : "—";
+  $("raw-fc").textContent = frameC;
+  $("raw-fw").textContent = frameW;
+
+  requestAnimationFrame(render);
+}
+
+function badge(id, text, connected, live = false, fault = false) {
+  const el = $(id);
+  el.textContent = connected ? text : `${text} …`;
+  el.className = "badge" + (fault ? " fault" : live ? " live" : connected ? " on" : "");
+}
+
+/// Contrast run: sweep the dye animation across the range for the current branch, at the
+/// app's 3 s / 30 fps pace (DyeLayerView). Holds the last frame until the run ends.
+function renderDye(dsaActive, now) {
+  if (!dsaActive) { dsaStartedAt = null; clearCanvas($("c-dye")); return; }
+  if (dsaStartedAt === null) dsaStartedAt = now;
+
+  const [from, to] = V.DYE_RANGES[currentPath] ?? V.DYE_RANGES.CeliacTrunk;
+  const progress = Math.min(1, (now - dsaStartedAt) / 1000 / V.DYE_DURATION_S);
+  const frame = Math.floor(from + progress * (to - from));
+  drawFrame($("c-dye"), frameURL("dye", frame));
+  prefetch("dye", frame);
+}
+
+await loadAssets();
+connect();
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
