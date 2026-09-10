@@ -96,10 +96,13 @@
   button:hover { background: #343945; }
   .controls { margin-top: 14px; display: flex; gap: 10px; }
   #recenter-all { margin-top: 20px; }
+  .layout-row { display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; }
+  .hands-section { display: flex; flex-direction: column; align-items: flex-start; }
 
   /* ---- catheter/guidewire simulation (mirrors ESP32Tracker/SimulationModel.swift) ---- */
   .sim-card { background: #1d2026; border: 1px solid #2a2e36; border-radius: 14px;
-              padding: 20px; margin-top: 28px; max-width: 788px; }
+              padding: 20px; margin: 0; flex: 1; min-width: 360px; max-width: 788px;
+              box-sizing: border-box; }
   .sim-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
   .sim-title { font-size: 17px; font-weight: 600; flex: 1; }
   .sim-hint { font-size: 12.5px; color: #9aa0a8; margin-bottom: 14px; line-height: 1.5; }
@@ -158,45 +161,49 @@
   </div>
   <div id="capture-flash"></div>
 
-  <div class="hands">
-    <div class="hand-card" id="card-left"></div>
-    <div class="hand-card" id="card-right"></div>
-  </div>
-  <button id="recenter-all">Re-center both</button>
-
-  <div class="sim-card">
-    <div class="sim-header">
-      <span class="sim-title">Catheter / Guidewire simulation</span>
-      <button id="sim-reset">Reset tools</button>
-    </div>
-    <div class="sim-hint">
-      Same manipulation model as the visionOS app: SoftPot touch = <b>grab</b> ·
-      strip slide + tracker roll = <b>twist</b> · <b>insert/retract</b> = ←/→ keys or mouse
-      wheel over the scene while grabbed (PC stand-in for Vision Pro hand tracking).
-      X-ray button makes the catheter translucent.
-    </div>
-    <div class="sim-scene" id="sim-scene">
-      <div class="sim-vessel" id="sim-vessel"></div>
-      <div class="sim-hub" id="sim-hub"></div>
-      <div class="sim-rod sim-catheter" id="rod-left"><div class="sim-tip"></div></div>
-      <div class="sim-rod sim-wire" id="rod-right"><div class="sim-tip"></div></div>
-    </div>
-    <div class="sim-readouts">
-      <div class="sim-tool">
-        <span class="dot" style="background:#0d9488"></span>
-        <span class="sim-tool-name">Catheter (left)</span>
-        <span class="badge" id="sim-grab-left">free</span>
-        <span class="sim-val">insert <b id="sim-ins-left">0.0</b> / 58 cm</span>
-        <span class="sim-val">twist <b id="sim-twist-left">+0.00</b> turns</span>
-        <span class="dial"><span class="dial-line" id="dial-left"></span></span>
+  <div class="layout-row">
+    <div class="hands-section">
+      <div class="hands">
+        <div class="hand-card" id="card-left"></div>
+        <div class="hand-card" id="card-right"></div>
       </div>
-      <div class="sim-tool">
-        <span class="dot" style="background:#9333ea"></span>
-        <span class="sim-tool-name">Guidewire (right)</span>
-        <span class="badge" id="sim-grab-right">free</span>
-        <span class="sim-val">insert <b id="sim-ins-right">0.0</b> / 61 cm</span>
-        <span class="sim-val">twist <b id="sim-twist-right">+0.00</b> turns</span>
-        <span class="dial"><span class="dial-line" id="dial-right"></span></span>
+      <button id="recenter-all">Re-center both</button>
+    </div>
+
+    <div class="sim-card">
+      <div class="sim-header">
+        <span class="sim-title">Catheter / Guidewire simulation</span>
+        <button id="sim-reset">Reset tools</button>
+      </div>
+      <div class="sim-hint">
+        Same manipulation model as the visionOS app: SoftPot touch = <b>grab</b> ·
+        strip slide + tracker roll = <b>twist</b> · <b>insert/retract</b> = ←/→ keys or mouse
+        wheel over the scene while grabbed (PC stand-in for Vision Pro hand tracking).
+        X-ray button makes the catheter translucent.
+      </div>
+      <div class="sim-scene" id="sim-scene">
+        <div class="sim-vessel" id="sim-vessel"></div>
+        <div class="sim-hub" id="sim-hub"></div>
+        <div class="sim-rod sim-catheter" id="rod-left"><div class="sim-tip"></div></div>
+        <div class="sim-rod sim-wire" id="rod-right"><div class="sim-tip"></div></div>
+      </div>
+      <div class="sim-readouts">
+        <div class="sim-tool">
+          <span class="dot" style="background:#0d9488"></span>
+          <span class="sim-tool-name">Catheter (left)</span>
+          <span class="badge" id="sim-grab-left">free</span>
+          <span class="sim-val">insert <b id="sim-ins-left">0.0</b> / 58 cm</span>
+          <span class="sim-val">twist <b id="sim-twist-left">+0.00</b> turns</span>
+          <span class="dial"><span class="dial-line" id="dial-left"></span></span>
+        </div>
+        <div class="sim-tool">
+          <span class="dot" style="background:#9333ea"></span>
+          <span class="sim-tool-name">Guidewire (right)</span>
+          <span class="badge" id="sim-grab-right">free</span>
+          <span class="sim-val">insert <b id="sim-ins-right">0.0</b> / 61 cm</span>
+          <span class="sim-val">twist <b id="sim-twist-right">+0.00</b> turns</span>
+          <span class="dial"><span class="dial-line" id="dial-right"></span></span>
+        </div>
       </div>
     </div>
   </div>
