@@ -168,6 +168,14 @@
   #schematic { position: absolute; inset: 0; display: none; }
   #schematic.show { display: block; }
 
+  #btn-toggle-cam {
+    background: #0d9488; color: #fff; border: 1px solid #14b8a6;
+    border-radius: 8px; padding: 7px 15px; font-size: 13px; font-weight: 700;
+    cursor: pointer; box-shadow: 0 0 10px rgba(13, 148, 136, 0.4);
+    transition: all .15s;
+  }
+  #btn-toggle-cam:hover { background: #0f766e; }
+
   body.presenting header, body.presenting #keys-card { display: none; }
 </style>
 </head>
@@ -175,6 +183,7 @@
 
 <header>
   <span class="brand">VascCath<small>PC connection · tracker demo</small></span>
+  <a href="/" style="font-size:12px; color:var(--dim); text-decoration:none; padding:4px 10px; border:1px solid var(--line); border-radius:8px; margin-right:6px; background:#1b1f26;">← 3D Cubes View</a>
   <span class="badge" id="b-left">Left tracker</span>
   <span class="badge" id="b-right">Right tracker</span>
   <span class="badge" id="b-lfoot">L pedal</span>
@@ -186,10 +195,15 @@
 </header>
 
 <div id="asset-warn">
-  <b>X-ray frame sequences not found</b> — showing the schematic view instead.
-  Point the server at them with <code>VASCCATH_IMAGES=/path/to/Sources/VascCathImagePackage</code>,
-  or copy the sequence folders into <code>pc_dashboard/frames/</code>.
-  <details><summary>paths searched</summary><ul id="asset-paths"></ul></details>
+  <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+    <div>
+      <b>X-ray frame sequences not found</b> — showing the schematic view instead.
+      Point the server at them with <code>VASCCATH_IMAGES=/path/to/Sources/VascCathImagePackage</code>,
+      or copy the sequence folders into <code>pc_dashboard/frames/</code>.
+      <details><summary>paths searched</summary><ul id="asset-paths"></ul></details>
+    </div>
+    <button type="button" onclick="document.getElementById('asset-warn').style.display='none'" style="padding:3px 9px; font-size:11px; flex-shrink:0;">✕ Dismiss</button>
+  </div>
 </div>
 
 <main>
@@ -263,6 +277,49 @@
         </div>
         <div class="bar"><div class="bar-fill" id="bar-right" style="background:var(--purple)"></div>
           <div class="bar-mark" id="mark-right"></div></div>
+      </div>
+    </div>
+
+    <div class="card" id="cam-card">
+      <h2>Webcam hand tracking</h2>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <button id="btn-toggle-cam" type="button">📷 Start camera</button>
+        <span class="badge" id="cam-badge">camera off</span>
+      </div>
+
+      <div id="cam-preview-box" style="position:relative; width:100%; height:165px; background:#0b0d10; border:1px solid var(--line); border-radius:8px; overflow:hidden; display:none; margin-bottom:10px;">
+        <video id="cam-video" playsinline muted style="display:none;"></video>
+        <canvas id="cam-canvas" width="320" height="240" style="width:100%; height:100%; object-fit:cover; display:block;"></canvas>
+      </div>
+
+      <div id="cam-status-lines" style="font-size:11.5px; line-height:1.7; display:none; margin-bottom:10px;" class="mono">
+        <div style="display:flex; justify-content:space-between;">
+          <span style="color:var(--teal)">L (Cath):</span>
+          <span id="cam-stat-left" style="color:var(--dim)">waiting…</span>
+        </div>
+        <div style="display:flex; justify-content:space-between;">
+          <span style="color:var(--purple)">R (Wire):</span>
+          <span id="cam-stat-right" style="color:var(--dim)">waiting…</span>
+        </div>
+      </div>
+
+      <div style="margin-top:4px;">
+        <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--dim); margin-bottom:3px;">
+          <span>Sensitivity (Y travel)</span>
+          <span id="cam-sens-val" class="mono">1.0x</span>
+        </div>
+        <input type="range" id="cam-sens" min="0.2" max="3.0" step="0.1" value="1.0" style="width:100%;">
+      </div>
+
+      <div style="display:flex; gap:12px; margin-top:8px; flex-wrap:wrap;">
+        <label class="toggle" style="margin-top:0;">
+          <input type="checkbox" id="cam-invert">
+          Invert Y <small>(push down = in)</small>
+        </label>
+        <label class="toggle" style="margin-top:0;">
+          <input type="checkbox" id="cam-swap">
+          Swap L/R hands
+        </label>
       </div>
     </div>
 
@@ -559,6 +616,304 @@ function resetAll() {
   resetTools();
   currentPath = "CeliacTrunk";
   doseSeconds = 0;
+  delete prevHandY.left;
+  delete prevHandY.right;
+}
+
+// ---------------------------------------------------------------------------
+// Webcam Hand Tracking (Y-Axis) via MediaPipe Tasks Vision
+// ---------------------------------------------------------------------------
+let handLandmarker = null;
+let camStream = null;
+let camRunning = false;
+let lastVideoTime = -1;
+const prevHandY = { left: undefined, right: undefined };
+
+const camBtn = $("btn-toggle-cam");
+const camBadge = $("cam-badge");
+const camBox = $("cam-preview-box");
+const camVideo = $("cam-video");
+const camCanvas = $("cam-canvas");
+const camCtx = camCanvas.getContext("2d");
+const statLeft = $("cam-stat-left");
+const statRight = $("cam-stat-right");
+const sensSlider = $("cam-sens");
+const sensVal = $("cam-sens-val");
+const camInvert = $("cam-invert");
+const camSwap = $("cam-swap");
+
+if (sensSlider) {
+  sensSlider.oninput = () => {
+    sensVal.textContent = `${parseFloat(sensSlider.value).toFixed(1)}x`;
+  };
+}
+
+async function initMediaPipe() {
+  if (handLandmarker) return true;
+  camBadge.textContent = "loading model…";
+  camBadge.className = "badge";
+  try {
+    const { FilesetResolver, HandLandmarker } = await import(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs"
+    );
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+    );
+    const modelAssetPath = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+    try {
+      handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath, delegate: "GPU" },
+        runningMode: "VIDEO",
+        numHands: 2,
+        minHandDetectionConfidence: 0.5,
+        minHandPresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+    } catch (gpuErr) {
+      console.warn("GPU delegate unavailable, falling back to CPU:", gpuErr);
+      handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath, delegate: "CPU" },
+        runningMode: "VIDEO",
+        numHands: 2,
+        minHandDetectionConfidence: 0.5,
+        minHandPresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+    }
+    return true;
+  } catch (err) {
+    console.error("MediaPipe initialization failed:", err);
+    camBadge.textContent = "load error";
+    camBadge.className = "badge fault";
+    alert("Could not load MediaPipe vision model. Ensure you have an active internet connection to download the model bundle.");
+    return false;
+  }
+}
+
+async function startCamera() {
+  try {
+    camBadge.textContent = "requesting camera…";
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" }
+    });
+    camVideo.srcObject = camStream;
+    await camVideo.play();
+    camRunning = true;
+    camBox.style.display = "block";
+    $("cam-status-lines").style.display = "block";
+    camBtn.textContent = "⏹ Stop camera";
+
+    // Start video loop immediately for video display
+    requestAnimationFrame(processCamLoop);
+
+    // Initialize MediaPipe model if not already ready
+    if (!handLandmarker) {
+      camBadge.textContent = "loading model…";
+      camBadge.className = "badge";
+      const ready = await initMediaPipe();
+      if (!ready || !camRunning) {
+        if (!ready) stopCamera();
+        return;
+      }
+    }
+
+    camBadge.textContent = "tracking";
+    camBadge.className = "badge on";
+  } catch (err) {
+    console.error("Webcam access failed:", err);
+    camBadge.textContent = "camera denied";
+    camBadge.className = "badge fault";
+    alert("Webcam access was denied or no camera was found. Please check your browser permissions.");
+  }
+}
+
+function stopCamera() {
+  camRunning = false;
+  if (camStream) {
+    camStream.getTracks().forEach(t => t.stop());
+    camStream = null;
+  }
+  camBox.style.display = "none";
+  $("cam-status-lines").style.display = "none";
+  camBtn.textContent = "📷 Start camera";
+  camBadge.textContent = "camera off";
+  camBadge.className = "badge";
+  delete prevHandY.left;
+  delete prevHandY.right;
+}
+
+if (camBtn) {
+  camBtn.onclick = () => (camRunning ? stopCamera() : startCamera());
+}
+
+function processCamLoop() {
+  if (!camRunning) return;
+
+  if (camVideo.readyState >= 2 && camVideo.currentTime !== lastVideoTime) {
+    lastVideoTime = camVideo.currentTime;
+
+    const vw = camVideo.videoWidth || 640;
+    const vh = camVideo.videoHeight || 480;
+    if (camCanvas.width !== vw || camCanvas.height !== vh) {
+      camCanvas.width = vw;
+      camCanvas.height = vh;
+    }
+
+    // Mirror horizontally so it feels natural like a mirror
+    camCtx.save();
+    camCtx.scale(-1, 1);
+    camCtx.drawImage(camVideo, -vw, 0, vw, vh);
+    camCtx.restore();
+
+    // Dark semi-transparent wash for better contrast with tracking graphics
+    camCtx.fillStyle = "rgba(11, 13, 16, 0.28)";
+    camCtx.fillRect(0, 0, vw, vh);
+
+    if (handLandmarker) {
+      const nowMs = performance.now();
+      const results = handLandmarker.detectForVideo(camVideo, nowMs);
+      handleHandDetections(results, vw, vh);
+    }
+  }
+
+  requestAnimationFrame(processCamLoop);
+}
+
+const seenThisFrame = { left: false, right: false };
+
+function handleHandDetections(results, vw, vh) {
+  seenThisFrame.left = false;
+  seenThisFrame.right = false;
+
+  if (results && results.landmarks && results.landmarks.length > 0) {
+    const swap = camSwap?.checked;
+    const sensitivity = parseFloat(sensSlider?.value) || 1.0;
+    const invert = camInvert?.checked ? -1 : 1;
+
+    // Package detected hands with their mirrored horizontal position
+    const detected = results.landmarks.map((landmarks, idx) => {
+      const handedness = results.handedness?.[idx]?.[0];
+      const rawCategory = (handedness?.categoryName || "Left").toLowerCase();
+      // Mirrored X of the palm center/wrist (0 = screen left, 1 = screen right)
+      const mx = 1 - ((landmarks[0].x + landmarks[9].x) / 2);
+      return { landmarks, rawCategory, mx, idx, handKey: "left" };
+    });
+
+    // If 2 hands are in frame, sort by screen-mirrored X position:
+    // the hand on the user's left (smaller mx) is physical Left (Catheter),
+    // and the hand on the user's right (larger mx) is physical Right (Guidewire).
+    if (detected.length === 2) {
+      detected.sort((a, b) => a.mx - b.mx);
+      detected[0].handKey = swap ? "right" : "left";
+      detected[1].handKey = swap ? "left" : "right";
+    } else {
+      // Single hand detected: assign based on which half of the screen it is on
+      for (const item of detected) {
+        let key = (item.mx < 0.5) ? "left" : "right";
+        if (swap) key = (key === "left") ? "right" : "left";
+        item.handKey = key;
+      }
+    }
+
+    for (const item of detected) {
+      const { landmarks, handKey } = item;
+      seenThisFrame[handKey] = true;
+
+      // Stable Y reference: average of wrist (landmark 0) and middle MCP knuckle (landmark 9)
+      const curY = (landmarks[0].y + landmarks[9].y) / 2;
+
+      // Draw hand skeleton / joints on canvas
+      drawHandOnCanvas(landmarks, handKey, vw, vh);
+
+      // Y-axis movement computation
+      const prevY = prevHandY[handKey];
+      if (prevY !== undefined) {
+        const deltaY = (curY - prevY); // moving up = negative, moving down = positive
+
+        // Ignore micro camera jitter (< 0.0015 of frame height)
+        if (Math.abs(deltaY) > 0.0015) {
+          // Scale to insertion distance: 1.0 normalized screen travel ~ 0.45m catheter travel
+          const insertionDelta = deltaY * invert * sensitivity * 0.45;
+
+          // Only move if SoftPot is touched (or rehearsal mode enabled)
+          const isGrabbed = tools[handKey].grabbed || forced();
+          if (isGrabbed) {
+            handMoved(handKey, insertionDelta, forced());
+          }
+        }
+      }
+      prevHandY[handKey] = curY;
+
+      // Update status line
+      const statEl = (handKey === "left") ? statLeft : statRight;
+      const isGrab = tools[handKey].grabbed;
+      if (statEl) {
+        statEl.textContent = `Y: ${(curY * 100).toFixed(0)}%  ${isGrab ? "[GRABBED]" : "[FREE]"}`;
+        statEl.style.color = isGrab ? "var(--green)" : "var(--dim)";
+      }
+    }
+  }
+
+  // Clear hands that were not seen this frame
+  for (const h of HANDS) {
+    if (!seenThisFrame[h]) {
+      delete prevHandY[h];
+      const statEl = (h === "left") ? statLeft : statRight;
+      if (statEl) {
+        statEl.textContent = "No hand in frame";
+        statEl.style.color = "var(--faint)";
+      }
+    }
+  }
+}
+
+function drawHandOnCanvas(landmarks, handKey, vw, vh) {
+  const isLeft = handKey === "left";
+  const isGrabbed = tools[handKey].grabbed;
+  const color = isGrabbed ? "#4ade80" : (isLeft ? "#0d9488" : "#9333ea");
+
+  camCtx.fillStyle = color;
+  camCtx.strokeStyle = color;
+  camCtx.lineWidth = 2;
+
+  // Draw landmarks (mirrored horizontally to match video mirror)
+  for (const pt of landmarks) {
+    const px = (1 - pt.x) * vw;
+    const py = pt.y * vh;
+    camCtx.beginPath();
+    camCtx.arc(px, py, 3, 0, 2 * Math.PI);
+    camCtx.fill();
+  }
+
+  // Draw connection lines between finger joints
+  const CONNECTIONS = [
+    [0,1],[1,2],[2,3],[3,4],       // thumb
+    [0,5],[5,6],[6,7],[7,8],       // index
+    [0,9],[9,10],[10,11],[11,12],  // middle
+    [0,13],[13,14],[14,15],[15,16],// ring
+    [0,17],[17,18],[18,19],[19,20],// pinky
+    [5,9],[9,13],[13,17]           // palm
+  ];
+  camCtx.beginPath();
+  for (const [a, b] of CONNECTIONS) {
+    camCtx.moveTo((1 - landmarks[a].x) * vw, landmarks[a].y * vh);
+    camCtx.lineTo((1 - landmarks[b].x) * vw, landmarks[b].y * vh);
+  }
+  camCtx.stroke();
+
+  // Draw hand identifier badge above the wrist
+  const wx = (1 - landmarks[0].x) * vw;
+  const wy = Math.max(18, landmarks[0].y * vh - 12);
+  camCtx.font = "bold 12px monospace";
+  camCtx.fillStyle = isGrabbed ? "#4ade80" : "#ffffff";
+  camCtx.shadowColor = "#000000";
+  camCtx.shadowBlur = 4;
+  camCtx.fillText(
+    `${isLeft ? "L (CATH)" : "R (WIRE)"}: ${isGrabbed ? "GRABBED" : "FREE"}`,
+    Math.max(10, Math.min(vw - 120, wx - 40)),
+    wy
+  );
+  camCtx.shadowBlur = 0;
 }
 
 function toggleFullscreen() {

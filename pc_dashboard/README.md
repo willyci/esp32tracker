@@ -79,6 +79,24 @@ Two checkboxes in the operator panel:
 - **insert without grabbing** — insertion normally requires the tool to be *grabbed* (a finger
   on the SoftPot), exactly as in the app. Tick this to rehearse with no tracker attached.
 
+### Webcam hand tracking (Y-Axis)
+
+Tracks hand translation via your laptop's front-facing camera using **MediaPipe Hands** directly in the browser:
+
+1. Click **📷 Start camera** in the sidebar. The browser requests webcam permissions.
+2. Hold the tracker(s) in view of your camera. Hands are automatically recognized:
+   - **Left Hand** controls the **Catheter** (teal)
+   - **Right Hand** controls the **Guidewire** (purple)
+3. **SoftPot Clutch Mechanism**:
+   - **No touch on SoftPot**: Hand movement does *not* move the catheter (`[FREE]`). You can reposition your hand freely without affecting depth.
+   - **Finger down on SoftPot**: The hand indicator turns green (`[GRABBED]`). Moving your hand along the Y-axis (pushing forward/up) advances the tool; pulling back retracts it.
+   - **Lift finger off SoftPot**: The tool locks in place at its current insertion depth.
+4. **Controls**:
+   - **Sensitivity slider**: Adjusts the ratio between hand travel and catheter insertion.
+   - **Invert Y**: Flips the direction (pushing up vs. pulling down to advance).
+   - **Swap L/R hands**: Swaps hand mapping if your camera is configured without mirroring.
+
+
 ### Demo-day checklist
 
 1. Trackers powered and showing *Connected* in the header.
