@@ -32,6 +32,29 @@ sequences over `boneBG.png`, picked by the same rotation→branch quadrant rule 
 so a visitor rolls the tracker and watches the catheter tip turn and the vessel branch change
 on a big screen, with no Vision Pro in the loop.
 
+The screen is split in half — X-ray on the left, everything else on the right:
+
+```
+┌──────────────────┬──────────────┬──────────────┐
+│                  │  tip dial    │  branch wheel│  ← top half:
+│                  │  −45°        │  Celiac Trunk│    image over text
+│      X-RAY       ├──────────────┼──────────────┤
+│   (square, 50%)  │              │  depth       │  ← bottom half
+│                  │   camera     │  operator    │
+└──────────────────┴──────────────┴──────────────┘
+```
+
+The two right-hand rows are exactly half the height each. Within the rotation row the dial
+and the branch wheel are laid out on a grid, so both images are always drawn at the same
+size even though their captions differ in height.
+
+The **insertion depth** bars read **right to left**, like the X-ray: the tool enters at the
+access site on the right (`entry`) and advances leftward into the vessel, past the `celiac`
+tick at 50 cm where the branch commits.
+
+The X-ray panel — and each rotation image — is always a true square sized to the smaller of
+its slot's width and height, so nothing is ever stretched on an unusual display.
+
 The frame math is a 1:1 port in [`vasccath.js`](vasccath.js) of
 `VideoControllerClass.getCatheterFrameByDistance`, `AppModel.branch(forUnitRotation:)` and
 `CatheterTipDial`; the tracker math is shared with the engineering page in
@@ -81,19 +104,50 @@ Two checkboxes in the operator panel:
 
 ### Webcam hand tracking (Y-Axis)
 
-Tracks hand translation via your laptop's front-facing camera using **MediaPipe Hands** directly in the browser:
+Tracks hand translation via your laptop's front-facing camera using **MediaPipe Hands**
+directly in the browser, with a **pinch** as the clutch — so someone can drive the catheter
+and the guidewire with nothing but their hands:
 
-1. Click **📷 Start camera** in the sidebar. The browser requests webcam permissions.
+1. Click **📷 Start camera** in the camera panel (bottom-left of the right half). The browser
+   requests webcam permissions.
 2. Hold the tracker(s) in view of your camera. Hands are automatically recognized:
    - **Left Hand** controls the **Catheter** (teal)
    - **Right Hand** controls the **Guidewire** (purple)
-3. **SoftPot Clutch Mechanism**:
-   - **No touch on SoftPot**: Hand movement does *not* move the catheter (`[FREE]`). You can reposition your hand freely without affecting depth.
-   - **Finger down on SoftPot**: The hand indicator turns green (`[GRABBED]`). Moving your hand along the Y-axis (pushing forward/up) advances the tool; pulling back retracts it.
-   - **Lift finger off SoftPot**: The tool locks in place at its current insertion depth.
-4. **Controls**:
-   - **Sensitivity slider**: Adjusts the ratio between hand travel and catheter insertion.
-   - **Invert Y**: Flips the direction (pushing up vs. pulling down to advance).
+3. **Clutch — pinch, or the SoftPot**. The tool only moves while it is *held*, and either
+   input holds it (they're OR'd, so a visitor with a tracker and a visitor with only a
+   webcam both work):
+   - **Pinch**: touch your thumb with **any** fingertip — index, middle, ring or pinky. This
+     is the same gesture the Vision Pro app uses. The skeleton links thumb to finger in
+     amber and the readout names the finger (`[PINCH · index]`).
+   - **SoftPot**: a finger down on the strip does the same thing (`[GRABBED]`).
+   - **Neither**: `[FREE]` — reposition your hand freely without affecting depth.
+   - **Release**: the tool locks in place at its current insertion depth.
+
+   The pinch is measured as a fraction of your palm length, so it works at any distance from
+   the camera, and it engages and releases at slightly different distances so a finger
+   hovering near the threshold doesn't make the catheter stutter.
+
+4. **Ratchet — advance it section by section.** The clutch works hand over hand, the way you
+   actually feed a catheter, so you never need one enormous arm sweep:
+
+   > **pinch** → move (tool moves) → **release** → bring your hand back (tool stays put) →
+   > **pinch** → move again
+
+   Each new grip anchors wherever your hand is at that moment, so returning between strokes
+   never drags the tool and closing your fingers never nudges it. Pinch and *lift* to
+   withdraw the same way.
+
+   Hand position is smoothed with a [One Euro filter](https://gery.casiez.net/1euro/) before
+   it is measured — heavily when your hand is nearly still, barely at all when it is moving —
+   so landmark jitter doesn't shake the catheter but a quick stroke isn't laggy. Movement too
+   small to apply on one frame is *accumulated* rather than discarded, so a slow deliberate
+   creep forward still registers.
+5. **Controls**:
+   - **Sensitivity slider** (0.2x–3.0x): ratio between hand travel and catheter insertion.
+     At the 1.0x default one full-height hand sweep drives ~57 cm — very nearly the
+     catheter's whole 58 cm range in a single pass.
+   - **Invert Y**: By default pulling the hand **down** advances the tool and lifting it up
+     retracts. Tick this to swap them.
    - **Swap L/R hands**: Swaps hand mapping if your camera is configured without mirroring.
 
 
