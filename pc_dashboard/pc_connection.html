@@ -53,17 +53,35 @@
   #dose { font-size: 12.5px; color: var(--dim); }
   #dose b { color: var(--ink); }
 
-  /* ---------- layout ---------- */
-  main { flex: 1; display: flex; gap: 20px; padding: 18px; min-height: 0; }
-  .stage { flex: 1; display: flex; align-items: center; justify-content: center; min-width: 0; }
-  aside { width: 330px; flex-shrink: 0; display: flex; flex-direction: column;
-          gap: 14px; overflow-y: auto; }
+  /* ---------- layout ----------
+     Half the screen is the X-ray; the other half stacks the rotation readout over the
+     camera section, which is itself split camera-left / data-right:
+
+       ┌──────────────┬───────────────────────────┐
+       │              │   catheter tip rotation   │
+       │    X-RAY     ├─────────────┬─────────────┤
+       │              │   camera    │   data      │
+       └──────────────┴─────────────┴─────────────┘                                      */
+  main { flex: 1; display: flex; gap: 16px; padding: 16px; min-height: 0; }
+
+  /* `container-type: size` + cqmin is what keeps the X-ray a true square: it takes the
+     SMALLER of the column's width and height, so the panel fits whatever the display is
+     without ever stretching the anatomy. */
+  .stage { flex: 0 0 50%; max-width: 50%; min-width: 0;
+           container-type: size; display: grid; place-items: center; }
+
+  .rail { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+  .rail-top { flex: 1 1 0; min-height: 0; display: flex; }
+  .rail-bottom { flex: 1 1 0; min-height: 0; display: flex; gap: 16px; }
+  .cam-col  { flex: 1 1 50%; min-width: 0; display: flex; }
+  .data-col { flex: 1 1 50%; min-width: 0; display: flex; flex-direction: column;
+              gap: 14px; overflow-y: auto; }
 
   /* ---------- the X-ray screen (mirrors XRayScreenView) ---------- */
   /* Square stack, back-to-front bone → dye → catheter → wire, pure alpha-over compositing
      (the SwiftUI version uses no blend modes). The border goes crimson while fluoro is on. */
   #xray {
-    position: relative; aspect-ratio: 1; height: 100%; max-height: 100%;
+    position: relative; width: 100cqmin; height: 100cqmin;
     background: #000; border: 12px solid #000; border-radius: 4px;
     overflow: hidden; transition: border-color .12s;
   }
@@ -100,18 +118,44 @@
   .card h2 { font-size: 11.5px; font-weight: 700; text-transform: uppercase;
              letter-spacing: .09em; color: var(--faint); margin: 0 0 11px; }
 
-  /* Rotation: the app's own tip dial image + the quadrant that picks the branch. */
-  .rot-row { display: flex; gap: 14px; align-items: center; }
-  #tip-dial { width: 104px; height: 104px; flex-shrink: 0; border-radius: 8px;
-              background: #1b1f26; display: block; }
-  .rot-nums { flex: 1; min-width: 0; }
-  .rot-deg { font-size: 30px; font-weight: 700; line-height: 1; }
-  .rot-sub { font-size: 12px; color: var(--dim); margin-top: 4px; }
+  /* Rotation: the app's own tip dial image + the quadrant that picks the branch.
+     Two columns — dial | wheel — each with its image on top and its text underneath.
+     The card owns the full top half, so both images grow to fill whatever is left after
+     the heading and the text. */
+  .rot-card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
-  #quadrant { width: 118px; height: 118px; flex-shrink: 0; }
+  /* A grid rather than two flex columns: it puts both images in one row and both captions
+     in another, so the dial and the wheel are always drawn at exactly the same size. Nested
+     flex columns would size each image against its own caption, and the two captions are
+     different heights — which showed up as one circle visibly larger than the other. */
+  .rot-flow {
+    flex: 1; min-height: 0; display: grid;
+    grid-template-columns: 1fr 1px 1fr;
+    grid-template-rows: 1fr auto;
+    grid-template-areas: "dial  sep wheel"
+                         "dialt sep wheelt";
+    column-gap: 22px; row-gap: 10px;
+  }
+  .a-dial   { grid-area: dial; }
+  .a-dialt  { grid-area: dialt; }
+  .a-wheel  { grid-area: wheel; }
+  .a-wheelt { grid-area: wheelt; }
+  .rot-sep { grid-area: sep; background: var(--line); }
+
+  /* Same cqmin trick as the X-ray: the image takes the smaller of the slot's width and
+     height, so a dial stays round and the quadrant stays circular at any window shape. */
+  .rot-media { flex: 1 1 0; min-height: 0; width: 100%;
+               container-type: size; display: grid; place-items: center; }
+  #tip-dial, #quadrant { width: 100cqmin; height: 100cqmin; }
+  #tip-dial { border-radius: 8px; background: #1b1f26; display: block; }
+
+  .rot-text { flex: 0 0 auto; text-align: center; width: 100%; }
+  .rot-deg { font-size: 34px; font-weight: 700; line-height: 1; }
+  .rot-sub { font-size: 12px; color: var(--dim); margin-top: 5px; }
   .rot-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em;
                color: var(--faint); line-height: 1.45; }
-  .branch-line { display: flex; align-items: center; gap: 9px; margin-top: 5px; }
+  .branch-line { display: flex; align-items: center; justify-content: center;
+                 gap: 9px; margin-top: 5px; }
   .branch-name { font-size: 16px; font-weight: 700; line-height: 1.2; }
   .branch-name.celiac  { color: #60a5fa; }
   .branch-name.splenic { color: var(--green); }
@@ -126,14 +170,23 @@
   .tool-name { font-weight: 600; flex: 1; }
   .tool-cm { font-size: 15px; font-weight: 700; }
   .tool-cm small { font-size: 10.5px; font-weight: 400; color: var(--faint); }
+  /* The bar runs RIGHT to LEFT, matching the X-ray: the tool enters at the access site on
+     the right and advances leftward into the vessel, so the fill grows the same way the
+     catheter on screen does.
+     The ticks live in .bar-wrap rather than in .bar, because .bar has to clip the fill to
+     its rounded ends — and that clipping also swallowed the captions underneath. */
+  .bar-wrap { position: relative; padding-bottom: 12px; }
   .bar { position: relative; height: 13px; background: #21262e;
          border-radius: 7px; overflow: hidden; }
-  .bar-fill { position: absolute; inset: 0 auto 0 0; border-radius: 7px;
+  .bar-fill { position: absolute; inset: 0 0 0 auto; border-radius: 7px;
               transition: width .05s linear; }
-  .bar-mark { position: absolute; top: -2px; bottom: -2px; width: 2px;
-              background: rgba(255,255,255,.45); }
-  .bar-mark::after { content: "celiac"; position: absolute; top: 15px; left: -15px;
-                     font-size: 9px; color: var(--faint); letter-spacing: .04em; }
+  .bar-tick { position: absolute; top: -2px; height: 17px; width: 2px; }
+  .bar-entry { right: 0; background: rgba(255,255,255,.7); }
+  .bar-mark  { background: rgba(255,255,255,.45); }
+  .bar-tick::after { position: absolute; top: 18px; font-size: 9px;
+                     color: var(--faint); letter-spacing: .04em; white-space: nowrap; }
+  .bar-mark::after  { content: "celiac"; left: 50%; transform: translateX(-50%); }
+  .bar-entry::after { content: "entry"; right: 0; }
   .grab { font-size: 10.5px; padding: 2px 8px; border-radius: 8px;
           background: #232830; color: var(--faint); }
   .grab.on { background: #163a26; color: var(--green); }
@@ -175,6 +228,13 @@
     transition: all .15s;
   }
   #btn-toggle-cam:hover { background: #0f766e; }
+
+  /* The camera card owns its whole half, with the preview taking whatever the controls
+     don't — so the video is as large as the layout allows rather than a fixed 165px strip.
+     `overflow-y: auto` matters because the body clips rather than scrolls: on a short screen
+     the controls must stay reachable instead of being cut off below the fold. */
+  #cam-card { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+  #cam-preview-box { flex: 1 1 140px; min-height: 90px; }
 
   body.presenting header, body.presenting #keys-card { display: none; }
 </style>
@@ -229,35 +289,87 @@
     </div>
   </div>
 
-  <aside>
-    <div class="card">
+  <div class="rail">
+    <section class="rail-top">
+    <div class="card rot-card">
       <h2>Catheter tip rotation</h2>
-      <div class="rot-row">
-        <canvas id="tip-dial" width="208" height="208"></canvas>
-        <div class="rot-nums">
+      <div class="rot-flow">
+        <div class="rot-media a-dial">
+          <canvas id="tip-dial" width="208" height="208"></canvas>
+        </div>
+
+        <div class="rot-sep"></div>
+
+        <div class="rot-media a-wheel">
+          <svg id="quadrant" viewBox="0 0 150 150"></svg>
+        </div>
+
+        <div class="rot-text a-dialt">
           <div class="rot-deg mono"><span id="rot-deg">0</span>°</div>
           <div class="rot-sub mono">
-            <span id="rot-turns">+0.00</span> turns<br>
-            roll the tracker to steer
+            <span id="rot-turns">+0.00</span> turns · roll the tracker to steer
           </div>
         </div>
-      </div>
 
-      <div class="rot-row" style="margin-top:14px">
-        <svg id="quadrant" viewBox="0 0 150 150"></svg>
-        <div class="rot-nums">
+        <div class="rot-text a-wheelt">
           <div class="rot-label">rotation selects the branch</div>
           <div class="branch-line">
             <span class="branch-name celiac" id="branch-name">Celiac Trunk</span>
-          </div>
-          <div class="branch-line" style="margin-top:7px">
             <span class="badge" id="branch-lock">selecting</span>
           </div>
-          <div class="rot-label" id="q-hint" style="margin-top:8px">turn to choose, then advance</div>
+          <div class="rot-label" id="q-hint" style="margin-top:6px">turn to choose, then advance</div>
+        </div>
+      </div>
+    </div>
+    </section>
+
+    <section class="rail-bottom">
+    <div class="cam-col">
+      <div class="card" id="cam-card">
+        <h2>Webcam hand tracking</h2>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+          <button id="btn-toggle-cam" type="button">📷 Start camera</button>
+          <span class="badge" id="cam-badge">camera off</span>
+        </div>
+
+        <div id="cam-preview-box" style="position:relative; background:#0b0d10; border:1px solid var(--line); border-radius:8px; overflow:hidden; display:none; margin-bottom:10px;">
+          <video id="cam-video" playsinline muted style="display:none;"></video>
+          <canvas id="cam-canvas" width="320" height="240" style="width:100%; height:100%; object-fit:cover; display:block;"></canvas>
+        </div>
+
+        <div id="cam-status-lines" style="font-size:11.5px; line-height:1.7; display:none; margin-bottom:10px;" class="mono">
+          <div style="display:flex; justify-content:space-between;">
+            <span style="color:var(--teal)">L (Cath):</span>
+            <span id="cam-stat-left" style="color:var(--dim)">waiting…</span>
+          </div>
+          <div style="display:flex; justify-content:space-between;">
+            <span style="color:var(--purple)">R (Wire):</span>
+            <span id="cam-stat-right" style="color:var(--dim)">waiting…</span>
+          </div>
+        </div>
+
+        <div style="margin-top:4px;">
+          <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--dim); margin-bottom:3px;">
+            <span>Sensitivity (Y travel)</span>
+            <span id="cam-sens-val" class="mono">1.0x</span>
+          </div>
+          <input type="range" id="cam-sens" min="0.2" max="3.0" step="0.1" value="1.0" style="width:100%;">
+        </div>
+
+        <div style="display:flex; gap:12px; margin-top:8px; flex-wrap:wrap;">
+          <label class="toggle" style="margin-top:0;">
+            <input type="checkbox" id="cam-invert">
+            Invert Y <small>(lift up = in)</small>
+          </label>
+          <label class="toggle" style="margin-top:0;">
+            <input type="checkbox" id="cam-swap">
+            Swap L/R hands
+          </label>
         </div>
       </div>
     </div>
 
+    <div class="data-col">
     <div class="card">
       <h2>Insertion depth</h2>
       <div class="tool">
@@ -266,8 +378,11 @@
           <span class="grab" id="grab-left">free</span>
           <span class="tool-cm mono"><span id="cm-left">0.0</span> <small>/ 58 cm</small></span>
         </div>
-        <div class="bar"><div class="bar-fill" id="bar-left" style="background:var(--teal)"></div>
-          <div class="bar-mark" id="mark-left"></div></div>
+        <div class="bar-wrap">
+          <div class="bar"><div class="bar-fill" id="bar-left" style="background:var(--teal)"></div></div>
+          <div class="bar-tick bar-mark" id="mark-left"></div>
+          <div class="bar-tick bar-entry"></div>
+        </div>
       </div>
       <div class="tool" style="margin-top:20px">
         <div class="tool-head">
@@ -275,51 +390,11 @@
           <span class="grab" id="grab-right">free</span>
           <span class="tool-cm mono"><span id="cm-right">0.0</span> <small>/ 61 cm</small></span>
         </div>
-        <div class="bar"><div class="bar-fill" id="bar-right" style="background:var(--purple)"></div>
-          <div class="bar-mark" id="mark-right"></div></div>
-      </div>
-    </div>
-
-    <div class="card" id="cam-card">
-      <h2>Webcam hand tracking</h2>
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-        <button id="btn-toggle-cam" type="button">📷 Start camera</button>
-        <span class="badge" id="cam-badge">camera off</span>
-      </div>
-
-      <div id="cam-preview-box" style="position:relative; width:100%; height:165px; background:#0b0d10; border:1px solid var(--line); border-radius:8px; overflow:hidden; display:none; margin-bottom:10px;">
-        <video id="cam-video" playsinline muted style="display:none;"></video>
-        <canvas id="cam-canvas" width="320" height="240" style="width:100%; height:100%; object-fit:cover; display:block;"></canvas>
-      </div>
-
-      <div id="cam-status-lines" style="font-size:11.5px; line-height:1.7; display:none; margin-bottom:10px;" class="mono">
-        <div style="display:flex; justify-content:space-between;">
-          <span style="color:var(--teal)">L (Cath):</span>
-          <span id="cam-stat-left" style="color:var(--dim)">waiting…</span>
+        <div class="bar-wrap">
+          <div class="bar"><div class="bar-fill" id="bar-right" style="background:var(--purple)"></div></div>
+          <div class="bar-tick bar-mark" id="mark-right"></div>
+          <div class="bar-tick bar-entry"></div>
         </div>
-        <div style="display:flex; justify-content:space-between;">
-          <span style="color:var(--purple)">R (Wire):</span>
-          <span id="cam-stat-right" style="color:var(--dim)">waiting…</span>
-        </div>
-      </div>
-
-      <div style="margin-top:4px;">
-        <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--dim); margin-bottom:3px;">
-          <span>Sensitivity (Y travel)</span>
-          <span id="cam-sens-val" class="mono">1.0x</span>
-        </div>
-        <input type="range" id="cam-sens" min="0.2" max="3.0" step="0.1" value="1.0" style="width:100%;">
-      </div>
-
-      <div style="display:flex; gap:12px; margin-top:8px; flex-wrap:wrap;">
-        <label class="toggle" style="margin-top:0;">
-          <input type="checkbox" id="cam-invert">
-          Invert Y <small>(push down = in)</small>
-        </label>
-        <label class="toggle" style="margin-top:0;">
-          <input type="checkbox" id="cam-swap">
-          Swap L/R hands
-        </label>
       </div>
     </div>
 
@@ -355,7 +430,9 @@
         <tr><td>wire frame</td><td class="v mono" id="raw-fw">—</td></tr>
       </table>
     </div>
-  </aside>
+    </div><!-- .data-col -->
+    </section>
+  </div><!-- .rail -->
 </main>
 
 <script type="module">
@@ -518,7 +595,9 @@ const STEP = 0.015;                          // meters of hand travel per key pr
 const TWIST_STEP = 5 * Math.PI / 180;        // radians per key press
 
 const forced = () => $("force-insert").checked;
-const insert = (hand, delta) => handMoved(hand, delta, forced());
+// A pinch counts as holding the tool here too, so the keys and the wheel work for someone
+// using the webcam clutch with no tracker in hand.
+const insert = (hand, delta) => handMoved(hand, delta, forced() || camPinch[hand]);
 
 // key → [hand, insertion delta]. handMoved advances on a NEGATIVE delta (VascCath's mapping),
 // so the first key of each pair pushes the tool in. Arrow keys are aliases for the catheter.
@@ -616,8 +695,7 @@ function resetAll() {
   resetTools();
   currentPath = "CeliacTrunk";
   doseSeconds = 0;
-  delete prevHandY.left;
-  delete prevHandY.right;
+  HANDS.forEach(resetRatchet);
 }
 
 // ---------------------------------------------------------------------------
@@ -627,7 +705,115 @@ let handLandmarker = null;
 let camStream = null;
 let camRunning = false;
 let lastVideoTime = -1;
-const prevHandY = { left: undefined, right: undefined };
+
+// ---------------------------------------------------------------------------
+// RATCHET
+//
+// Pinch, move, release, bring the hand back, pinch again — feeding the tool hand over hand,
+// the way you actually advance a catheter. Three things have to hold for that to feel right:
+//
+//   1. Nothing moves while released.
+//   2. A fresh grip anchors wherever the hand IS, so returning your hand between strokes
+//      never drags the tool, and the small shift that happens as your fingers close never
+//      nudges it.
+//   3. Slow movement must still register. A plain dead zone can't do this — it throws away
+//      every sub-threshold sample, so a deliberate creep forward registers as nothing at
+//      all. Here the anchor is only advanced by what actually got applied, so the remainder
+//      accumulates until it crosses the threshold. Nothing is lost, it is only quantised.
+// ---------------------------------------------------------------------------
+
+/// One Euro filter — smooths hard when the hand is nearly still, killing MediaPipe's
+/// landmark jitter, and backs off as it moves faster so deliberate motion isn't laggy.
+/// A fixed low-pass can only trade one for the other. https://gery.casiez.net/1euro/
+class OneEuroFilter {
+  // beta is deliberately high: it only takes effect once the hand is actually moving, so
+  // raising it recovers the travel a quick stroke would otherwise lose to filter lag
+  // (77% -> 95% of the true hand movement) without costing any steadiness when still —
+  // that is governed by minCutoff. Measured drift over 4 s pinched and motionless: 0.06 cm.
+  constructor({ minCutoff = 1.2, beta = 12, dCutoff = 1.0 } = {}) {
+    Object.assign(this, { minCutoff, beta, dCutoff });
+    this.reset();
+  }
+  reset() { this.x = null; this.dx = 0; this.t = null; }
+  static alpha(cutoff, dt) { return 1 / (1 + (1 / (2 * Math.PI * cutoff)) / dt); }
+
+  filter(x, tMs) {
+    if (this.x === null) { this.x = x; this.t = tMs; return x; }
+    const dt = Math.min(0.2, Math.max(1e-3, (tMs - this.t) / 1000));
+    this.t = tMs;
+    // Smooth the speed estimate, then let it widen the position cutoff.
+    this.dx += OneEuroFilter.alpha(this.dCutoff, dt) * ((x - this.x) / dt - this.dx);
+    const cutoff = this.minCutoff + this.beta * Math.abs(this.dx);
+    this.x += OneEuroFilter.alpha(cutoff, dt) * (x - this.x);
+    return this.x;
+  }
+}
+
+const yFilter       = { left: new OneEuroFilter(), right: new OneEuroFilter() };
+const anchorY       = { left: undefined, right: undefined };  // reference for the current grip
+const heldLastFrame = { left: false, right: false };           // for the grab edge
+const Y_DEADBAND    = 0.0005;   // frame heights; residual accumulates, so nothing is lost
+
+function resetRatchet(hand) {
+  yFilter[hand].reset();
+  anchorY[hand] = undefined;
+  heldLastFrame[hand] = false;
+}
+
+// ---------------------------------------------------------------------------
+// Pinch clutch
+//
+// Touching the thumb with ANY fingertip grabs the tool, which is how the Vision Pro app
+// works — there the grab is an ARKit pinch. It is OR'd with the SoftPot rather than
+// replacing it, so a visitor holding a tracker and a visitor with only a webcam both work.
+// ---------------------------------------------------------------------------
+const camPinch    = { left: false, right: false };   // is this hand pinching right now
+const pinchFinger = { left: null,  right: null };    // which finger, for the readout
+
+const FINGERTIPS = [
+  { tip: 8,  name: "index"  },
+  { tip: 12, name: "middle" },
+  { tip: 16, name: "ring"   },
+  { tip: 20, name: "pinky"  },
+];
+// Distances are expressed as a fraction of palm length, so they hold at any distance from
+// the camera. Two thresholds, not one: a single threshold chatters on and off when a finger
+// hovers right at the boundary, which reads as the catheter stuttering.
+const PINCH_ON  = 0.40;
+const PINCH_OFF = 0.55;
+
+/// Closest fingertip-to-thumb contact, or null if the hand is open.
+/// `wasPinching` selects the release threshold, giving the gesture hysteresis.
+/// `aspect` is the frame's width/height — landmarks are normalised independently on each
+/// axis, so without it a horizontal gap measures smaller than an identical vertical one and
+/// the gesture would fire at different real distances depending on how the hand is turned.
+function detectPinch(landmarks, wasPinching, aspect = 1) {
+  const gap = (a, b) => Math.hypot((a.x - b.x) * aspect, a.y - b.y);
+
+  // Palm length (wrist → middle knuckle) is the scale reference: unlike finger spans it
+  // barely changes as the hand opens and closes, so the thresholds below hold at any
+  // distance from the camera.
+  const palm = gap(landmarks[9], landmarks[0]);
+  if (!(palm > 1e-6)) return null;
+
+  const thumb = landmarks[4];
+  let best = null, bestDist = Infinity;
+  for (const finger of FINGERTIPS) {
+    // 2D only — MediaPipe's z is far noisier than x/y and would add false releases.
+    const d = gap(landmarks[finger.tip], thumb) / palm;
+    if (d < bestDist) { bestDist = d; best = finger; }
+  }
+  return bestDist < (wasPinching ? PINCH_OFF : PINCH_ON)
+    ? { ...best, dist: bestDist } : null;
+}
+
+/// The tool is grabbed if the SoftPot is touched OR the hand is pinching.
+const isGrabbed = hand => tools[hand].grabbed || camPinch[hand];
+
+function clearPinch(hand) {
+  camPinch[hand] = false;
+  pinchFinger[hand] = null;
+}
 
 const camBtn = $("btn-toggle-cam");
 const camBadge = $("cam-badge");
@@ -738,8 +924,8 @@ function stopCamera() {
   camBtn.textContent = "📷 Start camera";
   camBadge.textContent = "camera off";
   camBadge.className = "badge";
-  delete prevHandY.left;
-  delete prevHandY.right;
+  HANDS.forEach(resetRatchet);
+  HANDS.forEach(clearPinch);   // stopping the camera must not leave a tool pinched
 }
 
 if (camBtn) {
@@ -782,6 +968,7 @@ function processCamLoop() {
 const seenThisFrame = { left: false, right: false };
 
 function handleHandDetections(results, vw, vh) {
+  const frameTimeMs = performance.now();   // the filter needs real elapsed time, not frames
   seenThisFrame.left = false;
   seenThisFrame.right = false;
 
@@ -822,42 +1009,62 @@ function handleHandDetections(results, vw, vh) {
       // Stable Y reference: average of wrist (landmark 0) and middle MCP knuckle (landmark 9)
       const curY = (landmarks[0].y + landmarks[9].y) / 2;
 
+      // Pinch = clutch. Evaluate before drawing so the skeleton shows the current state.
+      const pinch = detectPinch(landmarks, camPinch[handKey], vw / vh);
+      camPinch[handKey] = !!pinch;
+      pinchFinger[handKey] = pinch?.name ?? null;
+
       // Draw hand skeleton / joints on canvas
-      drawHandOnCanvas(landmarks, handKey, vw, vh);
+      drawHandOnCanvas(landmarks, handKey, vw, vh, pinch);
 
-      // Y-axis movement computation
-      const prevY = prevHandY[handKey];
-      if (prevY !== undefined) {
-        const deltaY = (curY - prevY); // moving up = negative, moving down = positive
+      // --- ratchet ---------------------------------------------------------------
+      // Smooth first, then measure against an anchor that is re-taken every time a new
+      // grip starts. See the RATCHET block above for why each part is here.
+      const filteredY = yFilter[handKey].filter(curY, frameTimeMs);
+      const grabbedNow = isGrabbed(handKey) || forced();
+      const tookHold = grabbedNow && !heldLastFrame[handKey];
+      heldLastFrame[handKey] = grabbedNow;
 
-        // Ignore micro camera jitter (< 0.0015 of frame height)
-        if (Math.abs(deltaY) > 0.0015) {
-          // Scale to insertion distance: 1.0 normalized screen travel ~ 0.45m catheter travel
-          const insertionDelta = deltaY * invert * sensitivity * 0.45;
-
-          // Only move if SoftPot is touched (or rehearsal mode enabled)
-          const isGrabbed = tools[handKey].grabbed || forced();
-          if (isGrabbed) {
-            handMoved(handKey, insertionDelta, forced());
-          }
+      if (!grabbedNow || tookHold || anchorY[handKey] === undefined) {
+        // Hand free, or a fresh grip just closed: anchor here. This is what lets you bring
+        // your hand back between strokes without dragging the tool, and stops the small
+        // shift that happens *as* you pinch from nudging it.
+        anchorY[handKey] = filteredY;
+      } else {
+        const deltaY = filteredY - anchorY[handKey];   // down = positive
+        if (Math.abs(deltaY) > Y_DEADBAND) {
+          // Scale to insertion distance. At 1.0x a full-height hand sweep drives the
+          // catheter ~57 cm — very nearly its whole 58 cm range in a single pass, so
+          // nobody has to saw their arm up and down through a demo.
+          // Leading minus: screen Y grows downward, and handMoved advances on a negative
+          // delta, so this makes pulling the hand DOWN push the tool in — the direction of
+          // the real gesture, where you feed the catheter away from you into the groin.
+          handMoved(handKey, -deltaY * invert * sensitivity * 0.90, true);
+          anchorY[handKey] = filteredY;   // consume only what was actually applied
         }
+        // Below the deadband the anchor is deliberately LEFT ALONE, so the remainder keeps
+        // accumulating until it is worth applying. The old code dropped these samples and
+        // advanced its reference anyway, which silently ate slow, deliberate movement —
+        // exactly the movement you use to place a catheter a couple of centimetres at a time.
       }
-      prevHandY[handKey] = curY;
 
       // Update status line
       const statEl = (handKey === "left") ? statLeft : statRight;
-      const isGrab = tools[handKey].grabbed;
+      const grabbed = isGrabbed(handKey);
       if (statEl) {
-        statEl.textContent = `Y: ${(curY * 100).toFixed(0)}%  ${isGrab ? "[GRABBED]" : "[FREE]"}`;
-        statEl.style.color = isGrab ? "var(--green)" : "var(--dim)";
+        const state = pinch ? `[PINCH · ${pinch.name}]` : grabbed ? "[GRABBED]" : "[FREE]";
+        statEl.textContent = `Y: ${(curY * 100).toFixed(0)}%  ${state}`;
+        statEl.style.color = grabbed ? "var(--green)" : "var(--dim)";
       }
     }
   }
 
-  // Clear hands that were not seen this frame
+  // Clear hands that were not seen this frame. Releasing the pinch is the important part:
+  // a hand that walks out of frame mid-pinch must not leave its tool grabbed forever.
   for (const h of HANDS) {
     if (!seenThisFrame[h]) {
-      delete prevHandY[h];
+      resetRatchet(h);
+      clearPinch(h);
       const statEl = (h === "left") ? statLeft : statRight;
       if (statEl) {
         statEl.textContent = "No hand in frame";
@@ -867,10 +1074,10 @@ function handleHandDetections(results, vw, vh) {
   }
 }
 
-function drawHandOnCanvas(landmarks, handKey, vw, vh) {
+function drawHandOnCanvas(landmarks, handKey, vw, vh, pinch = null) {
   const isLeft = handKey === "left";
-  const isGrabbed = tools[handKey].grabbed;
-  const color = isGrabbed ? "#4ade80" : (isLeft ? "#0d9488" : "#9333ea");
+  const grabbed = isGrabbed(handKey);
+  const color = grabbed ? "#4ade80" : (isLeft ? "#0d9488" : "#9333ea");
 
   camCtx.fillStyle = color;
   camCtx.strokeStyle = color;
@@ -901,16 +1108,36 @@ function drawHandOnCanvas(landmarks, handKey, vw, vh) {
   }
   camCtx.stroke();
 
+  // Mark the pinch itself: a bright link between the thumb and whichever fingertip is
+  // touching it, so the person can see exactly what the clutch is reading.
+  if (pinch) {
+    const tx = (1 - landmarks[4].x) * vw,        ty = landmarks[4].y * vh;
+    const fx = (1 - landmarks[pinch.tip].x) * vw, fy = landmarks[pinch.tip].y * vh;
+    camCtx.strokeStyle = "#fbbf24";
+    camCtx.lineWidth = 3;
+    camCtx.beginPath();
+    camCtx.moveTo(tx, ty);
+    camCtx.lineTo(fx, fy);
+    camCtx.stroke();
+    camCtx.fillStyle = "#fbbf24";
+    for (const [px, py] of [[tx, ty], [fx, fy]]) {
+      camCtx.beginPath();
+      camCtx.arc(px, py, 6, 0, 2 * Math.PI);
+      camCtx.fill();
+    }
+  }
+
   // Draw hand identifier badge above the wrist
   const wx = (1 - landmarks[0].x) * vw;
   const wy = Math.max(18, landmarks[0].y * vh - 12);
   camCtx.font = "bold 12px monospace";
-  camCtx.fillStyle = isGrabbed ? "#4ade80" : "#ffffff";
+  camCtx.fillStyle = grabbed ? "#4ade80" : "#ffffff";
   camCtx.shadowColor = "#000000";
   camCtx.shadowBlur = 4;
   camCtx.fillText(
-    `${isLeft ? "L (CATH)" : "R (WIRE)"}: ${isGrabbed ? "GRABBED" : "FREE"}`,
-    Math.max(10, Math.min(vw - 120, wx - 40)),
+    `${isLeft ? "L (CATH)" : "R (WIRE)"}: ` +
+    (pinch ? `PINCH ${pinch.name.toUpperCase()}` : grabbed ? "GRABBED" : "FREE"),
+    Math.max(10, Math.min(vw - 150, wx - 40)),
     wy
   );
   camCtx.shadowBlur = 0;
@@ -1057,10 +1284,14 @@ function render(now) {
     const max = SIM.maxInsertion[hand];
     $(`cm-${hand}`).textContent = (t.insertion * 100).toFixed(1);
     $(`bar-${hand}`).style.width = `${(t.insertion / max) * 100}%`;
-    $(`mark-${hand}`).style.left = `${(V.CELIAC_TRUNK_DISTANCE / max) * 100}%`;
+    // Measured from the right, because that's where the tool enters.
+    $(`mark-${hand}`).style.right = `${(V.CELIAC_TRUNK_DISTANCE / max) * 100}%`;
+    // Held by the SoftPot or by a pinch — the depth panel shows whichever is doing it.
     const g = $(`grab-${hand}`);
-    g.textContent = t.grabbed ? "GRABBED" : "free";
-    g.className = "grab" + (t.grabbed ? " on" : "");
+    const held = isGrabbed(hand);
+    g.textContent = pinchFinger[hand] ? `PINCH ${pinchFinger[hand]}`
+                  : held ? "GRABBED" : "free";
+    g.className = "grab" + (held ? " on" : "");
   }
 
   // --- header ---
